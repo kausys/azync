@@ -2,7 +2,6 @@ package event
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"time"
@@ -10,8 +9,6 @@ import (
 	"github.com/kausys/azync"
 	"github.com/kausys/azync/driver"
 	"github.com/kausys/azync/internal/engine"
-
-	"github.com/google/uuid"
 )
 
 // Runtime is the event bus over one azync Core: the Publisher, the Worker and
@@ -88,10 +85,11 @@ func newRuntime(core *azync.Core, opts []Option, forOpen bool) (*Runtime, error)
 	r := &Runtime{core: core, cfg: cfg}
 	r.publisher = &Publisher{store: core.Store(), defaultMaxAttempts: cfg.DefaultMaxAttempts}
 	r.worker = &Worker{
-		engine:   eng,
-		cfg:      cfg,
-		logger:   core.Logger(),
-		handlers: map[string]Handler{},
+		engine: eng,
+		cfg:    cfg,
+		store:  core.Store(),
+		logger: core.Logger(),
+		subs:   map[string]subRegistration{},
 	}
 	r.manager = &Manager{store: core.Store()}
 	return r, nil
@@ -125,44 +123,16 @@ type EventArgs interface {
 	EventType() string
 }
 
-// Envelope is the durable event handed to a subscriber's handler. Delivery is
-// at-least-once and deliberately unordered, so handlers must deduplicate their
-// effects by (ID, Subscriber). AggregateID and Version remain in the envelope
-// for consumers that need to reject stale work.
-type Envelope struct {
-	// ID is the ledger event id.
-	ID uuid.UUID
-	// Type is the event type.
-	Type string
-	// TenantID scopes the event to a tenant; uuid.Nil means global/unset.
-	TenantID uuid.UUID
-	// AggregateType and AggregateID identify the source aggregate, if any.
-	AggregateType string
-	AggregateID   string
-	// Version is the aggregate version this event advanced to.
-	Version int64
-	// OccurredAt is the domain time the event happened.
-	OccurredAt time.Time
-	// Payload is the opaque event body, exactly as published.
-	Payload json.RawMessage
-	// Meta carries the string-valued annotations attached at publish time.
-	Meta map[string]string
-	// Subscriber is the name of the consumer this delivery targets.
-	Subscriber string
-	// Attempt is the 1-based delivery attempt (first delivery is attempt 1).
-	Attempt int
-	// Replay is true for deliveries created by Manager.Replay rather than the
-	// original publish fan-out.
-	Replay bool
-}
-
-// Handler consumes one event delivery. A plain error retries with the engine
-// backoff; wrap it in Permanent to dead-letter without consuming the budget.
-type Handler func(ctx context.Context, envelope Envelope) error
-
-// Subscriber declares a durable event consumer. A newly registered subscriber
-// receives future publishes only; use Manager.Replay for historical events.
-type Subscriber struct {
+// Subscription is a durable registration binding a named consumer to one event
+// type with its own retry budget. A newly registered subscription receives
+// future publishes only; use Manager.Replay for historical events. Registration
+// is an upsert keyed by (Name, EventType).
+//
+// Worker.Register and RegisterFunc upsert their subscriptions automatically in
+// Start; construct a Subscription by hand only for the administrative
+// Publisher.Register path (migrations, or subscribers consumed by external
+// processes).
+type Subscription struct {
 	Name        string
 	EventType   string
 	MaxAttempts int

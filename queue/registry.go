@@ -50,9 +50,11 @@ func WithJobTimeout(d time.Duration) RegisterOption {
 	}
 }
 
-// RegisterKind binds a handler for an explicit kind string. Same rules as
-// Register: it fails on duplicate kinds (typed or raw) and after Start.
-func RegisterKind(w *Worker, kind string, handler func(ctx context.Context, job RawJob) error, opts ...RegisterOption) error {
+// RegisterKind binds a raw handler for an explicit kind string — the seam for
+// dynamic kinds, where the handler receives the undecoded JSON payload and reads
+// its metadata from ctx (JobID, Kind, Attempt, ...). Same rules as Register: it
+// fails on duplicate kinds (typed or raw) and after Start.
+func RegisterKind(w *Worker, kind string, handler func(ctx context.Context, payload json.RawMessage) error, opts ...RegisterOption) error {
 	o := registerOptions{
 		concurrency: w.cfg.DefaultConcurrency,
 		maxRetries:  w.cfg.DefaultMaxAttempts,
@@ -70,15 +72,7 @@ func RegisterKind(w *Worker, kind string, handler func(ctx context.Context, job 
 		MaxAttemptsSet: o.maxRetriesSet,
 		Classify:       classify,
 		Handler: func(ctx context.Context, job driver.Job) error {
-			return handler(ctx, RawJob{
-				ID:          job.ID,
-				Kind:        job.Kind,
-				Payload:     job.Payload,
-				Attempt:     job.Attempt,
-				MaxAttempts: job.MaxAttempts,
-				EnqueuedAt:  job.EnqueuedAt,
-				Meta:        job.Meta,
-			})
+			return handler(NewContext(ctx, jobInfoFrom(job)), job.Payload)
 		},
 	})
 	if err != nil {
@@ -88,26 +82,20 @@ func RegisterKind(w *Worker, kind string, handler func(ctx context.Context, job 
 }
 
 // Register binds the handler for T's kind on the worker: sugar over
-// RegisterKind that decodes the payload into T. It fails on duplicate kinds
-// and after Start — registration happens in the composition root, before the
-// worker runs.
-func Register[T JobArgs](w *Worker, handler func(ctx context.Context, job Job[T]) error, opts ...RegisterOption) error {
+// RegisterKind that decodes the payload into T and hands the handler the pure
+// domain value. Job metadata travels on ctx (JobID, Attempt, IsRetry, ...). It
+// fails on duplicate kinds and after Start — registration happens in the
+// composition root, before the worker runs.
+func Register[T JobArgs](w *Worker, handler func(ctx context.Context, args T) error, opts ...RegisterOption) error {
 	var zero T
 	kind := zero.Kind()
 
-	return RegisterKind(w, kind, func(ctx context.Context, raw RawJob) error {
+	return RegisterKind(w, kind, func(ctx context.Context, payload json.RawMessage) error {
 		var args T
-		if err := json.Unmarshal(raw.Payload, &args); err != nil {
+		if err := json.Unmarshal(payload, &args); err != nil {
 			// A payload that cannot decode will never decode — retrying is futile.
 			return Abort(fmt.Errorf("queue: decode %s payload: %w", kind, err))
 		}
-		return handler(ctx, Job[T]{
-			ID:          raw.ID,
-			Args:        args,
-			Attempt:     raw.Attempt,
-			MaxAttempts: raw.MaxAttempts,
-			EnqueuedAt:  raw.EnqueuedAt,
-			Meta:        raw.Meta,
-		})
+		return handler(ctx, args)
 	}, opts...)
 }

@@ -108,10 +108,10 @@ func TestManagerReplayCreatesReplayDeliveriesWorkerReceivesFlag(t *testing.T) {
 	// Two deliveries now exist: the original (Replay=false) and the replay
 	// (Replay=true). Run the worker and assert both flags reach the handler.
 	seen := make(chan bool, 2)
-	is.NoError(r.Worker().Subscribe("billing", func(_ context.Context, e Envelope) error {
-		seen <- e.Replay
+	is.NoError(r.Worker().Register(namedSubscriber("billing"), On(func(ctx context.Context, _ orderCreated) error {
+		seen <- IsReplay(ctx)
 		return nil
-	}))
+	})))
 	startWorker(t, r.Worker())
 
 	flags := map[bool]int{}

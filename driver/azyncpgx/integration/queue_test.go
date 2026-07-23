@@ -38,10 +38,10 @@ func TestQueueEnqueueWorkerSucceeds(t *testing.T) {
 	ctx := context.Background()
 
 	done := make(chan struct{}, 1)
-	is.NoError(queue.Register(q.Worker(), func(_ context.Context, job queue.Job[itJob]) error {
-		is.Equal("hello", job.Args.V)
-		is.Equal(1, job.Attempt)
-		is.NotNil(job.Meta)
+	is.NoError(queue.Register(q.Worker(), func(ctx context.Context, job itJob) error {
+		is.Equal("hello", job.V)
+		is.Equal(1, queue.Attempt(ctx))
+		is.NotNil(queue.Metadata(ctx))
 		done <- struct{}{}
 		return nil
 	}))
@@ -70,7 +70,7 @@ func TestQueueRetryBackoffToDead(t *testing.T) {
 	ctx := context.Background()
 
 	var attempts atomic.Int32
-	is.NoError(queue.Register(q.Worker(), func(_ context.Context, _ queue.Job[itJob]) error {
+	is.NoError(queue.Register(q.Worker(), func(context.Context, itJob) error {
 		attempts.Add(1)
 		return errors.New("always fails") // plain error → retry with backoff
 	}, queue.WithMaxRetries(2)))
@@ -99,7 +99,7 @@ func TestQueueAbortGoesToDead(t *testing.T) {
 	ctx := context.Background()
 
 	var attempts atomic.Int32
-	is.NoError(queue.Register(q.Worker(), func(_ context.Context, _ queue.Job[itJob]) error {
+	is.NoError(queue.Register(q.Worker(), func(context.Context, itJob) error {
 		attempts.Add(1)
 		return queue.Abort(errors.New("permanent"))
 	}, queue.WithMaxRetries(5)))
@@ -124,7 +124,7 @@ func TestQueueRetryAfterDelay(t *testing.T) {
 
 	var attempts atomic.Int32
 	done := make(chan struct{}, 1)
-	is.NoError(queue.Register(q.Worker(), func(_ context.Context, _ queue.Job[itJob]) error {
+	is.NoError(queue.Register(q.Worker(), func(context.Context, itJob) error {
 		if attempts.Add(1) == 1 {
 			return queue.RetryAfter(errors.New("warm up"), 50*time.Millisecond)
 		}
@@ -180,7 +180,7 @@ func TestQueueScheduledPromotion(t *testing.T) {
 	ctx := context.Background()
 
 	done := make(chan struct{}, 1)
-	is.NoError(queue.Register(q.Worker(), func(_ context.Context, _ queue.Job[itJob]) error {
+	is.NoError(queue.Register(q.Worker(), func(context.Context, itJob) error {
 		done <- struct{}{}
 		return nil
 	}))
@@ -225,7 +225,7 @@ func TestQueueReaperRevivesDeadWorkerAndFencesStaleToken(t *testing.T) {
 	time.Sleep(300 * time.Millisecond) // let the lease expire
 
 	done := make(chan struct{}, 1)
-	is.NoError(queue.Register(q.Worker(), func(_ context.Context, _ queue.Job[itJob]) error {
+	is.NoError(queue.Register(q.Worker(), func(context.Context, itJob) error {
 		done <- struct{}{}
 		return nil
 	}))
@@ -330,7 +330,7 @@ func TestQueueCronLeadershipAndOccurrenceDedup(t *testing.T) {
 	}
 	for _, r := range runtimes {
 		is.NoError(r.Worker().RegisterCron("beat", "@every 1s", itJob{V: "cron"}))
-		is.NoError(queue.Register(r.Worker(), func(_ context.Context, _ queue.Job[itJob]) error { return nil }))
+		is.NoError(queue.Register(r.Worker(), func(context.Context, itJob) error { return nil }))
 		startWorker(t, r.Worker())
 	}
 

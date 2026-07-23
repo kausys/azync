@@ -42,7 +42,7 @@ func TestTxProducerRollbackAndCommit(t *testing.T) {
 	// Commit: the job lands and its after-commit NOTIFY wakes the worker under a
 	// 10s poll interval, so prompt delivery can only be the NOTIFY.
 	done := make(chan struct{}, 1)
-	is.NoError(queue.Register(q.Worker(), func(_ context.Context, _ queue.Job[itJob]) error {
+	is.NoError(queue.Register(q.Worker(), func(context.Context, itJob) error {
 		done <- struct{}{}
 		return nil
 	}))
@@ -80,7 +80,7 @@ func TestTxPublisherRollbackAndCommit(t *testing.T) {
 	ctx := context.Background()
 	pool := newPool(t, h.base, h.schema)
 
-	is.NoError(e.Publisher().Register(ctx, event.Subscriber{Name: "sink", EventType: orderEvent{}.EventType(), MaxAttempts: 3}))
+	is.NoError(e.Publisher().Register(ctx, event.Subscription{Name: "sink", EventType: orderEvent{}.EventType(), MaxAttempts: 3}))
 
 	txp, err := event.TxPublisher[pgx.Tx](e)
 	is.NoError(err)
@@ -101,7 +101,7 @@ func TestTxPublisherRollbackAndCommit(t *testing.T) {
 
 	// Commit: the event and its delivery land, and the NOTIFY wakes the worker.
 	done := make(chan struct{}, 1)
-	is.NoError(e.Worker().Subscribe("sink", func(_ context.Context, _ event.Envelope) error {
+	is.NoError(event.RegisterFunc(e.Worker(), "sink", func(context.Context, orderEvent) error {
 		done <- struct{}{}
 		return nil
 	}))

@@ -1,6 +1,8 @@
 // Command event-basic shows the minimal event bus workflow: register two
-// subscribers on the same event type, publish one event with aggregate and
-// metadata, and run the worker until interrupted.
+// subscribers on the same event type — one via the Subscriber interface plus an
+// On binding, one via the RegisterFunc shorthand — publish one event with
+// aggregate and metadata, and run the worker until interrupted. Handlers receive
+// the decoded domain event; delivery metadata is read from the context.
 package main
 
 import (
@@ -32,6 +34,31 @@ type userCreated struct {
 }
 
 func (userCreated) EventType() string { return "examples.user.created" }
+
+// welcomeEmailer is a durable event consumer. Implementing the Subscriber
+// interface names it; the On bindings passed to Register declare which typed
+// events it consumes.
+type welcomeEmailer struct{}
+
+func (welcomeEmailer) SubscriberName() string { return "examples.welcome-email" }
+
+// sendWelcome consumes the decoded event; the delivery metadata (which
+// subscriber, which attempt, whether this is a retry) comes from the context.
+func sendWelcome(ctx context.Context, evt userCreated) error {
+	slog.Info("welcome email",
+		"to", evt.Email,
+		"subscriber", event.SubscriberName(ctx),
+		"attempt", event.Attempt(ctx),
+		"retry", event.IsRetry(ctx))
+	return nil
+}
+
+// syncToCRM is a plain handler registered with RegisterFunc under an explicit
+// name — the shorthand for a single-type subscriber.
+func syncToCRM(ctx context.Context, evt userCreated) error {
+	slog.Info("crm sync", "email", evt.Email, "subscriber", event.SubscriberName(ctx))
+	return nil
+}
 
 func main() {
 	if err := run(); err != nil {
@@ -68,31 +95,37 @@ func run() error {
 		return fmt.Errorf("new event runtime: %w", err)
 	}
 
-	publisher := ev.Publisher()
-	const eventType = "examples.user.created"
-	for _, name := range []string{"examples.welcome-email", "examples.crm-sync"} {
-		sub := event.Subscriber{Name: name, EventType: eventType}
-		if err := publisher.Register(ctx, sub); err != nil {
-			return fmt.Errorf("register subscriber %s: %w", name, err)
+	// Register the subscribers. Their durable subscriptions are upserted by Start
+	// (before the worker becomes Ready), so no manual Publisher.Register is
+	// needed here.
+	if err := ev.Worker().Register(welcomeEmailer{}, event.On(sendWelcome)); err != nil {
+		return fmt.Errorf("register welcome-email: %w", err)
+	}
+	if err := event.RegisterFunc(ev.Worker(), "examples.crm-sync", syncToCRM); err != nil {
+		return fmt.Errorf("register crm-sync: %w", err)
+	}
+
+	// Run the worker in the background so this goroutine can publish once its
+	// subscriptions exist.
+	workerErr := make(chan error, 1)
+	go func() {
+		err := ev.Worker().Start(ctx)
+		if err != nil && !errors.Is(err, context.Canceled) {
+			workerErr <- err
+			return
 		}
+		workerErr <- nil
+	}()
+
+	// Ready closes after Start has upserted the subscriptions, so a publish now
+	// fans out a delivery to each of them.
+	select {
+	case <-ev.Worker().Ready():
+	case err := <-workerErr:
+		return fmt.Errorf("worker failed to start: %w", err)
 	}
 
-	// One handler reused by both subscribers; the envelope itself carries
-	// which subscriber this delivery is for.
-	logDelivery := func(_ context.Context, env event.Envelope) error {
-		slog.Info("delivery received",
-			"subscriber", env.Subscriber, "type", env.Type,
-			"aggregate_id", env.AggregateID, "attempt", env.Attempt)
-		return nil
-	}
-	if err := ev.Worker().Subscribe("examples.welcome-email", logDelivery); err != nil {
-		return fmt.Errorf("subscribe: %w", err)
-	}
-	if err := ev.Worker().Subscribe("examples.crm-sync", logDelivery); err != nil {
-		return fmt.Errorf("subscribe: %w", err)
-	}
-
-	id, err := publisher.Publish(ctx, userCreated{Email: "ada@example.com"},
+	id, err := ev.Publisher().Publish(ctx, userCreated{Email: "ada@example.com"},
 		event.WithAggregate("user", "usr_123"),
 		event.WithMeta("source", "signup-form"))
 	if err != nil {
@@ -100,8 +133,8 @@ func run() error {
 	}
 	slog.Info("published", "event_id", id)
 
-	slog.Info("worker starting; press ctrl-C to stop")
-	if err := ev.Worker().Start(ctx); err != nil && !errors.Is(err, context.Canceled) {
+	slog.Info("worker running; press ctrl-C to stop")
+	if err := <-workerErr; err != nil {
 		return fmt.Errorf("worker: %w", err)
 	}
 	slog.Info("worker stopped cleanly")

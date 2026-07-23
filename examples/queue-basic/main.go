@@ -70,8 +70,10 @@ func run() error {
 		return fmt.Errorf("new queue runtime: %w", err)
 	}
 
-	err = queue.Register(q.Worker(), func(_ context.Context, job queue.Job[emailJob]) error {
-		slog.Info("sending email", "to", job.Args.To, "attempt", job.Attempt)
+	// The handler receives the decoded job value directly; per-delivery metadata
+	// (attempt, id, ...) travels on ctx and is read through the queue accessors.
+	err = queue.Register(q.Worker(), func(ctx context.Context, job emailJob) error {
+		slog.Info("sending email", "to", job.To, "attempt", queue.Attempt(ctx))
 		return nil
 	})
 	if err != nil {

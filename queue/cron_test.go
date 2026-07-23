@@ -195,7 +195,7 @@ func TestCronDisabledWithoutLeaderElector(t *testing.T) {
 	is.NoError(r.Worker().RegisterCron("minutely", "* * * * *", cronArgs{}))
 
 	done := make(chan struct{}, 1)
-	is.NoError(Register(r.Worker(), func(context.Context, Job[testArgs]) error {
+	is.NoError(Register(r.Worker(), func(context.Context, testArgs) error {
 		done <- struct{}{}
 		return nil
 	}))

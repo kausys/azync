@@ -5,7 +5,6 @@ package main
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"log"
@@ -86,35 +85,24 @@ func run() error {
 		return fmt.Errorf("new event runtime: %w", err)
 	}
 
-	err = queue.Register(q.Worker(), func(_ context.Context, job queue.Job[sendReceipt]) error {
-		slog.Info("sending receipt", "order_id", job.Args.OrderID)
+	err = queue.Register(q.Worker(), func(_ context.Context, job sendReceipt) error {
+		slog.Info("sending receipt", "order_id", job.OrderID)
 		return nil
 	})
 	if err != nil {
 		return fmt.Errorf("register: %w", err)
 	}
 
-	sub := event.Subscriber{Name: projector, EventType: orderPlaced{}.EventType()}
-	if err := ev.Publisher().Register(ctx, sub); err != nil {
-		return fmt.Errorf("register subscriber: %w", err)
-	}
-
 	// The projector pattern: an event handler enqueues a job in response,
-	// bridging the durable ledger to durable background work.
-	err = ev.Worker().Subscribe(projector, func(ctx context.Context, env event.Envelope) error {
-		var order orderPlaced
-		if err := json.Unmarshal(env.Payload, &order); err != nil {
-			return event.Permanent(err)
-		}
+	// bridging the durable ledger to durable background work. The handler
+	// receives the decoded orderPlaced directly — no envelope, no Unmarshal — and
+	// RegisterFunc upserts the durable subscription in Start.
+	err = event.RegisterFunc(ev.Worker(), projector, func(ctx context.Context, order orderPlaced) error {
 		_, err := q.Producer().Enqueue(ctx, sendReceipt(order))
 		return err
 	})
 	if err != nil {
-		return fmt.Errorf("subscribe: %w", err)
-	}
-
-	if _, err := ev.Publisher().Publish(ctx, orderPlaced{OrderID: "ord_9001"}); err != nil {
-		return fmt.Errorf("publish: %w", err)
+		return fmt.Errorf("register projector: %w", err)
 	}
 
 	slog.Info("workers starting; press ctrl-C to stop")
@@ -129,6 +117,16 @@ func run() error {
 			log.Printf("event worker: %v", err)
 		}
 	})
+
+	// Publish only after the projector's subscription exists (Start upserts it
+	// before the worker becomes Ready), so the event fans out a delivery to it.
+	select {
+	case <-ev.Worker().Ready():
+		if _, err := ev.Publisher().Publish(ctx, orderPlaced{OrderID: "ord_9001"}); err != nil {
+			log.Printf("publish: %v", err)
+		}
+	case <-ctx.Done():
+	}
 	wg.Wait()
 
 	qStats, err := q.Manager().AllStats(context.Background())

@@ -15,7 +15,39 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-func TestWorkerDeliversEnvelopeToEverySubscriber(t *testing.T) {
+// capturedDelivery is what a handler observes: the decoded event plus the
+// delivery metadata it reads from ctx.
+type capturedDelivery struct {
+	value         string
+	id            uuid.UUID
+	typ           string
+	tenantID      uuid.UUID
+	aggregateType string
+	aggregateID   string
+	version       int64
+	meta          map[string]string
+	subscriber    string
+	attempt       int
+	replay        bool
+}
+
+func capture(ctx context.Context, evt orderCreated) capturedDelivery {
+	return capturedDelivery{
+		value:         evt.Value,
+		id:            EventID(ctx),
+		typ:           Type(ctx),
+		tenantID:      TenantID(ctx),
+		aggregateType: AggregateType(ctx),
+		aggregateID:   AggregateID(ctx),
+		version:       Version(ctx),
+		meta:          Metadata(ctx),
+		subscriber:    SubscriberName(ctx),
+		attempt:       Attempt(ctx),
+		replay:        IsReplay(ctx),
+	}
+}
+
+func TestWorkerDeliversTypedEventToEverySubscriber(t *testing.T) {
 	t.Parallel()
 	is := require.New(t)
 	f := drivertest.NewFake()
@@ -24,16 +56,16 @@ func TestWorkerDeliversEnvelopeToEverySubscriber(t *testing.T) {
 	register(t, r, "billing", orderCreated{}.EventType(), 3)
 	register(t, r, "notify", orderCreated{}.EventType(), 3)
 
-	billing := make(chan Envelope, 1)
-	notify := make(chan Envelope, 1)
-	is.NoError(r.Worker().Subscribe("billing", func(_ context.Context, e Envelope) error {
-		billing <- e
+	billing := make(chan capturedDelivery, 1)
+	notify := make(chan capturedDelivery, 1)
+	is.NoError(r.Worker().Register(namedSubscriber("billing"), On(func(ctx context.Context, e orderCreated) error {
+		billing <- capture(ctx, e)
 		return nil
-	}))
-	is.NoError(r.Worker().Subscribe("notify", func(_ context.Context, e Envelope) error {
-		notify <- e
+	})))
+	is.NoError(r.Worker().Register(namedSubscriber("notify"), On(func(ctx context.Context, e orderCreated) error {
+		notify <- capture(ctx, e)
 		return nil
-	}))
+	})))
 
 	id, err := r.Publisher().Publish(context.Background(), orderCreated{Value: "hi"},
 		WithAggregate("order", "ord_1"), WithVersion(7), WithMeta("k", "v"))
@@ -41,19 +73,19 @@ func TestWorkerDeliversEnvelopeToEverySubscriber(t *testing.T) {
 
 	startWorker(t, r.Worker())
 
-	for name, ch := range map[string]chan Envelope{"billing": billing, "notify": notify} {
+	for name, ch := range map[string]chan capturedDelivery{"billing": billing, "notify": notify} {
 		select {
 		case e := <-ch:
-			is.Equal(id, e.ID)
-			is.Equal("orders.created.v1", e.Type)
-			is.Equal("order", e.AggregateType)
-			is.Equal("ord_1", e.AggregateID)
-			is.EqualValues(7, e.Version)
-			is.Equal(map[string]string{"k": "v"}, e.Meta)
-			is.JSONEq(`{"value":"hi"}`, string(e.Payload))
-			is.Equal(name, e.Subscriber)
-			is.Equal(1, e.Attempt)
-			is.False(e.Replay)
+			is.Equal("hi", e.value, "the handler receives the decoded domain event")
+			is.Equal(id, e.id)
+			is.Equal("orders.created.v1", e.typ)
+			is.Equal("order", e.aggregateType)
+			is.Equal("ord_1", e.aggregateID)
+			is.EqualValues(7, e.version)
+			is.Equal(map[string]string{"k": "v"}, e.meta)
+			is.Equal(name, e.subscriber)
+			is.Equal(1, e.attempt)
+			is.False(e.replay)
 		case <-time.After(2 * time.Second):
 			t.Fatalf("subscriber %q did not receive its delivery", name)
 		}
@@ -76,22 +108,22 @@ func TestWorkerRetriesFailedDeliveryWithBackoff(t *testing.T) {
 	register(t, r, "billing", orderCreated{}.EventType(), 3)
 
 	var attempts atomic.Int32
-	seen := make(chan int, 4)
-	is.NoError(r.Worker().Subscribe("billing", func(_ context.Context, e Envelope) error {
-		seen <- e.Attempt
+	seen := make(chan bool, 4) // IsRetry per entry
+	is.NoError(r.Worker().Register(namedSubscriber("billing"), On(func(ctx context.Context, _ orderCreated) error {
+		seen <- IsRetry(ctx)
 		if attempts.Add(1) == 1 {
 			return errors.New("transient")
 		}
 		return nil
-	}))
+	})))
 
 	_, err := r.Publisher().Publish(context.Background(), orderCreated{Value: "x"})
 	is.NoError(err)
 
 	startWorker(t, r.Worker())
 
-	// Attempt 1 fails -> scheduled at now+Backoff(1).
-	is.Equal(1, <-seen)
+	// Attempt 1 is not a retry -> fails -> scheduled at now+Backoff(1).
+	is.False(<-seen, "the first delivery is not a retry")
 	is.Eventually(func() bool {
 		return deliveryOf(t, f, "billing").State == driver.StateScheduled
 	}, 2*time.Second, 2*time.Millisecond)
@@ -100,9 +132,9 @@ func TestWorkerRetriesFailedDeliveryWithBackoff(t *testing.T) {
 		"a plain error must park the delivery at now+Backoff(attempt): %v", got.RunAt)
 	is.Equal("transient", got.LastError)
 
-	// Make the retry due; promotion re-dequeues it and attempt 2 succeeds.
+	// Make the retry due; promotion re-dequeues it and attempt 2 (a retry) succeeds.
 	clk.Advance(engine.Backoff(1) + time.Second)
-	is.Equal(2, <-seen)
+	is.True(<-seen, "the second delivery is a retry")
 	is.Eventually(func() bool {
 		return deliveryOf(t, f, "billing").State == driver.StateSucceeded
 	}, 2*time.Second, 2*time.Millisecond)
@@ -117,10 +149,10 @@ func TestWorkerPermanentErrorDeadLettersImmediately(t *testing.T) {
 	register(t, r, "billing", orderCreated{}.EventType(), 9)
 
 	var runs atomic.Int32
-	is.NoError(r.Worker().Subscribe("billing", func(context.Context, Envelope) error {
+	is.NoError(r.Worker().Register(namedSubscriber("billing"), On(func(context.Context, orderCreated) error {
 		runs.Add(1)
 		return Permanent(errors.New("invalid payload"))
-	}))
+	})))
 
 	_, err := r.Publisher().Publish(context.Background(), orderCreated{Value: "x"})
 	is.NoError(err)
@@ -144,10 +176,10 @@ func TestWorkerExhaustedBudgetGoesDead(t *testing.T) {
 	register(t, r, "billing", orderCreated{}.EventType(), 2)
 
 	var runs atomic.Int32
-	is.NoError(r.Worker().Subscribe("billing", func(context.Context, Envelope) error {
+	is.NoError(r.Worker().Register(namedSubscriber("billing"), On(func(context.Context, orderCreated) error {
 		runs.Add(1)
 		return errors.New("keeps failing")
-	}))
+	})))
 
 	_, err := r.Publisher().Publish(context.Background(), orderCreated{Value: "x"})
 	is.NoError(err)
@@ -171,16 +203,17 @@ func TestWorkerIsolatesSubscribersByKind(t *testing.T) {
 	f := drivertest.NewFake()
 	r := newTestRuntime(t, f)
 
-	// Two subscribers registered, but only one has a live handler: the engine
-	// only fetches subscribed kinds, so the unhandled delivery is never leased.
+	// Two subscribers registered durably, but only one has a live binding: the
+	// engine only fetches subscribed kinds, so the unhandled delivery is never
+	// leased.
 	register(t, r, "billing", orderCreated{}.EventType(), 3)
 	register(t, r, "notify", orderCreated{}.EventType(), 3)
 
 	done := make(chan struct{}, 1)
-	is.NoError(r.Worker().Subscribe("billing", func(context.Context, Envelope) error {
+	is.NoError(r.Worker().Register(namedSubscriber("billing"), On(func(context.Context, orderCreated) error {
 		done <- struct{}{}
 		return nil
-	}))
+	})))
 
 	_, err := r.Publisher().Publish(context.Background(), orderCreated{Value: "x"})
 	is.NoError(err)
@@ -198,7 +231,7 @@ func TestWorkerIsolatesSubscribersByKind(t *testing.T) {
 	// Give the isolated delivery time to prove it is never leased.
 	time.Sleep(50 * time.Millisecond)
 	is.Equal(driver.StatePending, deliveryOf(t, f, "notify").State,
-		"a subscriber without a live handler must never have its delivery leased")
+		"a subscriber without a live binding must never have its delivery leased")
 	is.Equal(0, deliveryOf(t, f, "notify").Attempt)
 }
 
@@ -213,7 +246,7 @@ func TestWorkerPerSubscriberConcurrency(t *testing.T) {
 	const deliveries = 6
 	var inflight, maxInflight, processed atomic.Int32
 	allDone := make(chan struct{})
-	is.NoError(r.Worker().Subscribe("billing", func(context.Context, Envelope) error {
+	is.NoError(r.Worker().Register(namedSubscriber("billing"), On(func(context.Context, orderCreated) error {
 		cur := inflight.Add(1)
 		for {
 			prev := maxInflight.Load()
@@ -227,7 +260,7 @@ func TestWorkerPerSubscriberConcurrency(t *testing.T) {
 			close(allDone)
 		}
 		return nil
-	}))
+	})))
 
 	for range deliveries {
 		_, err := r.Publisher().Publish(context.Background(), orderCreated{Value: "slow"})
@@ -247,7 +280,8 @@ func TestWorkerReadyClosesAfterStart(t *testing.T) {
 	t.Parallel()
 	is := require.New(t)
 	r := newTestRuntime(t, drivertest.NewFake())
-	is.NoError(r.Worker().Subscribe("billing", func(context.Context, Envelope) error { return nil }))
+	is.NoError(r.Worker().Register(namedSubscriber("billing"),
+		On(func(context.Context, orderCreated) error { return nil })))
 
 	select {
 	case <-r.Worker().Ready():
@@ -268,7 +302,7 @@ func TestWorkerShutdownDrainLetsSlowDeliveryFinish(t *testing.T) {
 
 	started := make(chan struct{}, 1)
 	var canceled atomic.Bool
-	is.NoError(r.Worker().Subscribe("billing", func(ctx context.Context, _ Envelope) error {
+	is.NoError(r.Worker().Register(namedSubscriber("billing"), On(func(ctx context.Context, _ orderCreated) error {
 		started <- struct{}{}
 		select {
 		case <-time.After(100 * time.Millisecond):
@@ -276,7 +310,7 @@ func TestWorkerShutdownDrainLetsSlowDeliveryFinish(t *testing.T) {
 			canceled.Store(true)
 		}
 		return nil
-	}))
+	})))
 
 	_, err := r.Publisher().Publish(context.Background(), orderCreated{Value: "slow"})
 	is.NoError(err)
@@ -315,17 +349,16 @@ func TestWorkerStartCanRetryAfterSetupFailure(t *testing.T) {
 	is.NoError(err)
 
 	done := make(chan struct{}, 1)
-	is.NoError(r.Worker().Subscribe("billing", func(context.Context, Envelope) error {
+	is.NoError(r.Worker().Register(namedSubscriber("billing"), On(func(context.Context, orderCreated) error {
 		done <- struct{}{}
 		return nil
-	}))
+	})))
 
 	err = r.Worker().Start(context.Background())
 	is.Error(err)
 	is.Contains(err.Error(), "wake")
 
 	// The failed setup must not poison the worker: a retry starts and delivers.
-	register(t, r, "billing", orderCreated{}.EventType(), 3)
 	_, err = r.Publisher().Publish(context.Background(), orderCreated{Value: "retry"})
 	is.NoError(err)
 	startWorker(t, r.Worker())
@@ -346,10 +379,10 @@ func TestWorkerMissingLedgerRecordDeadLetters(t *testing.T) {
 	register(t, r, "billing", orderCreated{}.EventType(), 3)
 
 	var runs atomic.Int32
-	is.NoError(r.Worker().Subscribe("billing", func(context.Context, Envelope) error {
+	is.NoError(r.Worker().Register(namedSubscriber("billing"), On(func(context.Context, orderCreated) error {
 		runs.Add(1)
 		return nil
-	}))
+	})))
 
 	// A delivery whose ledger event is absent (should never happen in practice):
 	// the adapter must dead-letter it, not panic, and never call the handler.

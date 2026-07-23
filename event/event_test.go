@@ -27,6 +27,22 @@ type orderCancelled struct{}
 
 func (orderCancelled) EventType() string { return "orders.cancelled.v1" }
 
+// namedSubscriber is a minimal event.Subscriber identified only by its name; it
+// inherits the runtime's default retry budget.
+type namedSubscriber string
+
+func (n namedSubscriber) SubscriberName() string { return string(n) }
+
+// budgetSubscriber is a Subscriber that also pins its own retry budget through
+// the optional MaxAttempts interface.
+type budgetSubscriber struct {
+	name string
+	max  int
+}
+
+func (b budgetSubscriber) SubscriberName() string { return b.name }
+func (b budgetSubscriber) MaxAttempts() int       { return b.max }
+
 func discardLogger() *slog.Logger { return slog.New(slog.DiscardHandler) }
 
 // azyncNew builds a quiet Core over any store (used to mask fake capabilities).
@@ -85,11 +101,11 @@ func awaitReady(t *testing.T, w *Worker) {
 	}
 }
 
-// register adds a subscriber directly through the publisher.
+// register adds a subscription directly through the publisher.
 func register(t *testing.T, r *Runtime, name, eventType string, maxAttempts int) {
 	t.Helper()
 	require.NoError(t, r.Publisher().Register(context.Background(),
-		Subscriber{Name: name, EventType: eventType, MaxAttempts: maxAttempts}))
+		Subscription{Name: name, EventType: eventType, MaxAttempts: maxAttempts}))
 }
 
 // deliveryOf returns the single delivery job of a subscriber.

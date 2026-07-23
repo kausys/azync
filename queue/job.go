@@ -1,7 +1,6 @@
 package queue
 
 import (
-	"encoding/json"
 	"time"
 
 	"github.com/kausys/azync/driver"
@@ -15,24 +14,14 @@ type JobArgs interface {
 	Kind() string
 }
 
-// Job carries a decoded unit of work into its handler. Cross-cutting context
-// travels in ctx; job-specific data lives here.
-type Job[T JobArgs] struct {
-	ID          uuid.UUID
-	Args        T
-	Attempt     int // 1-based: first execution is attempt 1
-	MaxAttempts int
-	EnqueuedAt  time.Time
-	Meta        map[string]string
-}
-
-// RawJob carries an undecoded unit of work into a raw handler — the seam for
-// dynamic kinds (undecoded payloads for adapters that cannot use Register[T]).
-type RawJob struct {
+// JobInfo is the cross-cutting metadata of one job execution. Handlers receive
+// the decoded arguments as their typed value; everything about the job itself —
+// its id, kind, attempt and publish-time annotations — travels on the context
+// and is read through the package accessors (JobID, Kind, Attempt, ...).
+type JobInfo struct {
 	ID          uuid.UUID
 	Kind        string
-	Payload     json.RawMessage
-	Attempt     int // 1-based
+	Attempt     int // 1-based: first execution is attempt 1
 	MaxAttempts int
 	EnqueuedAt  time.Time
 	Meta        map[string]string

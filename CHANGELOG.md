@@ -1,5 +1,25 @@
 # Changelog
 
+## 0.0.2 (2026-07-23)
+
+
+### ⚠ BREAKING CHANGES
+
+* handlers now receive the pure domain value; `event.Envelope`, `queue.Job[T]` and `queue.RawJob` are removed, and delivery/job metadata moved to the context accessors
+* `event.Subscriber` is now the identity interface for worker registration; the durable catalog record was renamed to `event.Subscription`
+* `event.Worker.Subscribe` was replaced by `Register` (interface + typed `On` bindings) and `RegisterFunc`
+
+### Features
+
+* typed event bindings: `event.On(fn)` infers the event type from the handler signature and decodes the payload before invoking it — no casts, no manual unmarshalling
+* self-describing subscribers: `Worker.Register` upserts the durable subscription (subscriber × event types) idempotently on `Start`, so `Publisher.Register` is only needed for administrative registration
+* context metadata accessors in both runtimes (`Attempt`, `IsRetry`, `Metadata`, `EventID`, `IsReplay`, `JobID`, `Kind`, ...) plus `DeliveryFromContext` / `JobFromContext` and `NewContext` helpers for testing handlers in isolation
+* optional `MaxAttempts() int` on a subscriber overrides the runtime default for its durable subscriptions
+
+### Documentation
+
+* "Bring your own logger": wiring zap through its official `zapslog` bridge, silencing azync with `slog.DiscardHandler`, and pointers to zerolog/logrus bridges
+
 ## 0.0.1 (2026-07-23)
 
 

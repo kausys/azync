@@ -63,8 +63,10 @@ func main() {
 		log.Fatal(err)
 	}
 
-	err = queue.Register(q.Worker(), func(_ context.Context, job queue.Job[WelcomeEmail]) error {
-		log.Printf("sending welcome email to %s", job.Args.To)
+	// The handler receives the decoded job value directly; per-job metadata
+	// (attempt, id, enqueue time, ...) travels on ctx via the queue accessors.
+	err = queue.Register(q.Worker(), func(ctx context.Context, job WelcomeEmail) error {
+		log.Printf("sending welcome email to %s (attempt %d)", job.To, queue.Attempt(ctx))
 		return nil
 	})
 	if err != nil {
@@ -105,6 +107,20 @@ type UserSignedUp struct {
 
 func (UserSignedUp) EventType() string { return "app.user.signed_up" }
 
+// welcomeMailer is a subscriber: SubscriberName identifies it, and the On
+// binding passed to Register declares the typed event it consumes. The handler
+// receives the decoded event; delivery metadata (attempt, id, whether this is a
+// retry, ...) travels on ctx and is read through the event accessors.
+type welcomeMailer struct{}
+
+func (welcomeMailer) SubscriberName() string { return "welcome-email" }
+
+func (welcomeMailer) send(ctx context.Context, evt UserSignedUp) error {
+	log.Printf("welcoming %s (attempt %d, retry %t)",
+		evt.Email, event.Attempt(ctx), event.IsRetry(ctx))
+	return nil
+}
+
 func main() {
 	ctx := context.Background()
 
@@ -123,28 +139,27 @@ func main() {
 		log.Fatal(err)
 	}
 
-	// A subscriber is a durable registration: publishes after this point fan
-	// out a delivery to it, whether or not a handler is live yet.
-	sub := event.Subscriber{Name: "welcome-email", EventType: "app.user.signed_up"}
-	if err := ev.Publisher().Register(ctx, sub); err != nil {
+	// Register the subscriber and its typed binding. Start upserts the durable
+	// subscription before the worker becomes Ready, so a publish after that fans
+	// out a delivery to it. RegisterFunc(ev.Worker(), "name", fn) is the
+	// shorthand for a single-type subscriber that skips the interface.
+	m := welcomeMailer{}
+	if err := ev.Worker().Register(m, event.On(m.send)); err != nil {
 		log.Fatal(err)
 	}
 
-	err = ev.Worker().Subscribe("welcome-email", func(_ context.Context, env event.Envelope) error {
-		log.Printf("delivering %s to %s (attempt %d)", env.Type, env.Subscriber, env.Attempt)
-		return nil
-	})
-	if err != nil {
-		log.Fatal(err)
-	}
+	go func() {
+		if err := ev.Worker().Start(ctx); err != nil {
+			log.Fatal(err)
+		}
+	}()
+	<-ev.Worker().Ready()
 
 	if _, err := ev.Publisher().Publish(ctx, UserSignedUp{Email: "ada@example.com"}); err != nil {
 		log.Fatal(err)
 	}
 
-	if err := ev.Worker().Start(ctx); err != nil {
-		log.Fatal(err)
-	}
+	select {} // a real service blocks on its signal context instead
 }
 ```
 
@@ -275,6 +290,38 @@ Settings resolve in layers: a runtime-specific option (`queue.With*` / `event.Wi
 | Poll-only, no LISTEN/NOTIFY (infra, `Open` only) | `PollOnly()` | — | disabled (push enabled) |
 
 `queue.Open` / `event.Open` accept `WithCoreOptions(...)` to forward `azync.Option`s to the private `Core` they build internally; it is rejected by `New`, which composes over an already-built `Core`.
+
+### Bring your own logger
+
+azync logs through the standard library's `*slog.Logger`, so any logging backend with a `slog.Handler` bridge plugs in without adapters. By default (no `WithLogger`) it logs through `slog.Default()`.
+
+With [zap](https://github.com/uber-go/zap), via its official `zapslog` bridge:
+
+```go
+import (
+	"log/slog"
+
+	"go.uber.org/zap"
+	"go.uber.org/zap/exp/zapslog"
+
+	"github.com/kausys/azync"
+)
+
+zl, _ := zap.NewProduction()
+defer zl.Sync()
+
+core, err := azync.Open(dsn,
+	azync.WithLogger(slog.New(zapslog.NewHandler(zl.Core()))))
+```
+
+To silence azync entirely:
+
+```go
+core, err := azync.Open(dsn,
+	azync.WithLogger(slog.New(slog.DiscardHandler)))
+```
+
+zerolog (`slog-zerolog`), logrus (`slog-logrus`), and most other structured loggers ship equivalent `slog.Handler` bridges.
 
 ## Writing a driver
 

@@ -3,8 +3,8 @@ module github.com/kausys/azync/examples
 go 1.26.5
 
 require (
-	github.com/kausys/azync v0.0.1
-	github.com/kausys/azync/driver/azyncpgx v0.0.0
+	github.com/kausys/azync v0.0.2
+	github.com/kausys/azync/driver/azyncpgx v0.0.2
 )
 
 require (

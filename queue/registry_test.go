@@ -19,7 +19,7 @@ func TestRegisterDuplicateKindFails(t *testing.T) {
 	is := require.New(t)
 	r := newTestRuntime(t, drivertest.NewFake())
 
-	handler := func(context.Context, Job[testArgs]) error { return nil }
+	handler := func(context.Context, testArgs) error { return nil }
 	is.NoError(Register(r.Worker(), handler))
 	err := Register(r.Worker(), handler)
 	is.Error(err)
@@ -30,12 +30,12 @@ func TestRegisterAfterStartFails(t *testing.T) {
 	t.Parallel()
 	is := require.New(t)
 	r := newTestRuntime(t, drivertest.NewFake())
-	is.NoError(Register(r.Worker(), func(context.Context, Job[testArgs]) error { return nil }))
+	is.NoError(Register(r.Worker(), func(context.Context, testArgs) error { return nil }))
 
 	startWorker(t, r.Worker())
 	awaitReady(t, r.Worker())
 
-	err := RegisterKind(r.Worker(), "late.kind", func(context.Context, RawJob) error { return nil })
+	err := RegisterKind(r.Worker(), "late.kind", func(context.Context, json.RawMessage) error { return nil })
 	is.Error(err)
 	is.Contains(err.Error(), "queue: cannot register after start")
 }
@@ -47,7 +47,7 @@ func TestUndecodablePayloadDeadLettersWithoutHandler(t *testing.T) {
 	r := newTestRuntime(t, f)
 
 	var handlerRuns atomic.Int32
-	is.NoError(Register(r.Worker(), func(context.Context, Job[testArgs]) error {
+	is.NoError(Register(r.Worker(), func(context.Context, testArgs) error {
 		handlerRuns.Add(1)
 		return nil
 	}))
@@ -76,9 +76,24 @@ func TestRegisterKindPassesRawPayloadThrough(t *testing.T) {
 	f := drivertest.NewFake()
 	r := newTestRuntime(t, f)
 
-	got := make(chan RawJob, 1)
-	is.NoError(RegisterKind(r.Worker(), "raw.kind", func(_ context.Context, job RawJob) error {
-		got <- job
+	// rawDelivery captures what a raw handler sees: the undecoded payload plus the
+	// job metadata it reads from ctx.
+	type rawDelivery struct {
+		id      uuid.UUID
+		kind    string
+		payload json.RawMessage
+		attempt int
+		meta    map[string]string
+	}
+	got := make(chan rawDelivery, 1)
+	is.NoError(RegisterKind(r.Worker(), "raw.kind", func(ctx context.Context, payload json.RawMessage) error {
+		got <- rawDelivery{
+			id:      JobID(ctx),
+			kind:    Kind(ctx),
+			payload: payload,
+			attempt: Attempt(ctx),
+			meta:    Metadata(ctx),
+		}
 		return nil
 	}))
 
@@ -93,11 +108,11 @@ func TestRegisterKindPassesRawPayloadThrough(t *testing.T) {
 	startWorker(t, r.Worker())
 	select {
 	case job := <-got:
-		is.Equal(id, job.ID)
-		is.Equal("raw.kind", job.Kind)
-		is.JSONEq(string(payload), string(job.Payload), "the raw payload must pass through undecoded")
-		is.Equal(1, job.Attempt)
-		is.Equal(map[string]string{"a": "1"}, job.Meta)
+		is.Equal(id, job.id)
+		is.Equal("raw.kind", job.kind)
+		is.JSONEq(string(payload), string(job.payload), "the raw payload must pass through undecoded")
+		is.Equal(1, job.attempt)
+		is.Equal(map[string]string{"a": "1"}, job.meta)
 	case <-time.After(2 * time.Second):
 		t.Fatal("raw handler did not run")
 	}
@@ -110,7 +125,7 @@ func TestWithMaxRetriesResolvesOnFirstLease(t *testing.T) {
 	r := newTestRuntime(t, f, WithDefaultMaxRetries(25))
 
 	done := make(chan struct{}, 1)
-	is.NoError(Register(r.Worker(), func(context.Context, Job[testArgs]) error {
+	is.NoError(Register(r.Worker(), func(context.Context, testArgs) error {
 		done <- struct{}{}
 		return nil
 	}, WithMaxRetries(7)))

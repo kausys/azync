@@ -23,20 +23,23 @@ type Publisher struct {
 	defaultMaxAttempts int
 }
 
-// Register adds or updates a durable subscriber. A subscriber registered with
-// MaxAttempts <= 0 inherits the runtime's default retry budget (floored at 1);
-// registration is an upsert keyed by (Name, EventType).
-func (p *Publisher) Register(ctx context.Context, subscriber Subscriber) error {
-	if subscriber.Name == "" || subscriber.EventType == "" {
+// Register adds or updates a durable subscription. A subscription registered
+// with MaxAttempts <= 0 inherits the runtime's default retry budget (floored at
+// 1); registration is an upsert keyed by (Name, EventType). Worker.Register and
+// RegisterFunc perform this upsert automatically in Start; call this directly
+// only for administrative registration (migrations, or subscribers consumed by
+// external processes).
+func (p *Publisher) Register(ctx context.Context, subscription Subscription) error {
+	if subscription.Name == "" || subscription.EventType == "" {
 		return errors.New("event: subscriber name and event type are required")
 	}
-	if subscriber.MaxAttempts <= 0 {
-		subscriber.MaxAttempts = p.defaultMaxAttempts
+	if subscription.MaxAttempts <= 0 {
+		subscription.MaxAttempts = p.defaultMaxAttempts
 	}
-	if subscriber.MaxAttempts < 1 {
-		subscriber.MaxAttempts = 1
+	if subscription.MaxAttempts < 1 {
+		subscription.MaxAttempts = 1
 	}
-	return p.store.RegisterSubscriber(ctx, driver.Subscriber(subscriber))
+	return p.store.RegisterSubscriber(ctx, driver.Subscriber(subscription))
 }
 
 // Publish appends an event to the ledger. The backend selects the matching

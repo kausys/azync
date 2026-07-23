@@ -22,18 +22,18 @@ func TestRegisterValidatesAndResolvesMaxAttempts(t *testing.T) {
 	ctx := context.Background()
 
 	// Missing name or event type is rejected.
-	is.Error(r.Publisher().Register(ctx, Subscriber{EventType: "orders.created.v1"}))
-	is.Error(r.Publisher().Register(ctx, Subscriber{Name: "billing"}))
+	is.Error(r.Publisher().Register(ctx, Subscription{EventType: "orders.created.v1"}))
+	is.Error(r.Publisher().Register(ctx, Subscription{Name: "billing"}))
 
 	// MaxAttempts <= 0 inherits the runtime default.
-	is.NoError(r.Publisher().Register(ctx, Subscriber{Name: "billing", EventType: "orders.created.v1"}))
+	is.NoError(r.Publisher().Register(ctx, Subscription{Name: "billing", EventType: "orders.created.v1"}))
 	subs, err := f.ListSubscriberViews(ctx, "orders.created.v1")
 	is.NoError(err)
 	is.Len(subs, 1)
 	is.Equal(9, subs[0].MaxAttempts, "an unset budget must inherit the runtime default")
 
 	// An explicit budget is kept.
-	is.NoError(r.Publisher().Register(ctx, Subscriber{Name: "notify", EventType: "orders.created.v1", MaxAttempts: 3}))
+	is.NoError(r.Publisher().Register(ctx, Subscription{Name: "notify", EventType: "orders.created.v1", MaxAttempts: 3}))
 	subs, err = f.ListSubscriberViews(ctx, "orders.created.v1")
 	is.NoError(err)
 	is.Len(subs, 2)
@@ -51,7 +51,7 @@ func TestRegisterFloorsDefaultToOne(t *testing.T) {
 	is.NoError(err)
 	ctx := context.Background()
 
-	is.NoError(r.Publisher().Register(ctx, Subscriber{Name: "billing", EventType: "orders.created.v1"}))
+	is.NoError(r.Publisher().Register(ctx, Subscription{Name: "billing", EventType: "orders.created.v1"}))
 	subs, err := f.ListSubscriberViews(ctx, "orders.created.v1")
 	is.NoError(err)
 	is.Len(subs, 1)
@@ -65,8 +65,8 @@ func TestRegisterUpsertsExisting(t *testing.T) {
 	r := newTestRuntime(t, f)
 	ctx := context.Background()
 
-	is.NoError(r.Publisher().Register(ctx, Subscriber{Name: "billing", EventType: "orders.created.v1", MaxAttempts: 2}))
-	is.NoError(r.Publisher().Register(ctx, Subscriber{Name: "billing", EventType: "orders.created.v1", MaxAttempts: 5}))
+	is.NoError(r.Publisher().Register(ctx, Subscription{Name: "billing", EventType: "orders.created.v1", MaxAttempts: 2}))
+	is.NoError(r.Publisher().Register(ctx, Subscription{Name: "billing", EventType: "orders.created.v1", MaxAttempts: 5}))
 
 	subs, err := f.ListSubscriberViews(ctx, "orders.created.v1")
 	is.NoError(err)
