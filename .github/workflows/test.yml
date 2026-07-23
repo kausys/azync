@@ -6,6 +6,12 @@ on:
   pull_request:
     branches: [main]
 
+defaults:
+  run:
+    # PowerShell splits arguments like -coverprofile=coverage.out at the dot,
+    # so run every step through bash on all runners.
+    shell: bash
+
 jobs:
   test:
     name: Test (${{ matrix.module }}, ${{ matrix.os }})
