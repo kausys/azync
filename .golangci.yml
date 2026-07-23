@@ -1,0 +1,99 @@
+version: "2"
+
+linters:
+  default: none
+  enable:
+    # bugs
+    - errcheck
+    - govet
+    - staticcheck
+    - bodyclose
+    - nilerr
+    - errorlint
+    - errname
+    - exhaustive
+    - sqlclosecheck
+    - rowserrcheck
+    # security
+    - gosec
+    # quality
+    - revive
+    - unused
+    - ineffassign
+    - unconvert
+    - contextcheck
+    - noctx
+    # modernize (autofix)
+    - intrange
+    - exptostd
+    - modernize
+    - usestdlibvars
+    - perfsprint
+    - copyloopvar
+    # additional quality
+    - nilnil
+    - nonamedreturns
+    - sloglint
+    - tagliatelle
+    - gocritic
+    # testing
+    - testifylint
+    - thelper
+    # bugs/correctness
+    - mirror
+    - musttag
+    - fatcontext
+    - reassign
+    # code quality
+    - gochecknoinits
+    - prealloc
+    - dupword
+    - wastedassign
+    - predeclared
+    # concurrency
+    - tparallel
+    - containedctx
+  settings:
+    revive:
+      enable-all-rules: false
+      rules:
+        - name: import-alias-naming
+          severity: error
+          arguments:
+            - "^[a-z][a-z0-9]*$"
+    exhaustive:
+      default-signifies-exhaustive: true
+    perfsprint:
+      err-error: true
+      strconcat: false
+    tagliatelle:
+      case:
+        rules:
+          json: camel
+          yaml: camel
+          xml: camel
+          env: upperSnake
+    gocritic:
+      enabled-checks:
+        - filepathJoin
+        - commentedOutCode
+        - deferInLoop
+        - docStub
+        - paramTypeCombine
+        - ptrToRefParam
+        - stringXbytes
+        - unnecessaryBlock
+        - weakCond
+
+formatters:
+  enable:
+    - gci
+    - gofmt
+  settings:
+    gci:
+      custom-order: true
+      sections:
+        - standard
+        - blank
+        - prefix(github.com/kausys/azync)
+        - default

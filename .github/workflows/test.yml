@@ -1,0 +1,115 @@
+name: Test
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  test:
+    name: Test (${{ matrix.module }}, ${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+        module:
+          - .
+          - examples
+
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Set up Go
+        uses: actions/setup-go@v7
+        with:
+          # Pin the toolchain to go.mod so CI cannot drift from the modules.
+          go-version-file: go.mod
+          cache: false
+
+      - name: Download dependencies
+        working-directory: ${{ matrix.module }}
+        run: go mod download
+
+      - name: Check go mod tidy
+        working-directory: ${{ matrix.module }}
+        env:
+          GOWORK: off
+        run: |
+          go mod tidy
+          git diff --exit-code -- go.mod go.sum
+
+      - name: Build
+        working-directory: ${{ matrix.module }}
+        run: go build ./...
+
+      - name: Test
+        working-directory: ${{ matrix.module }}
+        run: go test -v -race -coverprofile=coverage.out ./...
+
+      - name: Upload coverage
+        uses: codecov/codecov-action@v7
+        continue-on-error: true
+        with:
+          files: ${{ matrix.module == '.' && 'coverage.out' || format('{0}/coverage.out', matrix.module) }}
+          flags: ${{ matrix.module == '.' && 'root' || matrix.module }}
+          fail_ci_if_error: false
+          token: ${{ secrets.CODECOV_TOKEN }}
+
+  test-driver-azyncpgx:
+    name: Test (driver/azyncpgx, ubuntu-latest)
+    runs-on: ubuntu-latest
+    env:
+      AZYNC_INTEGRATION_DATABASE_URL: postgres://azync:azync@localhost:5432/azync?sslmode=disable
+    services:
+      postgres:
+        image: postgres:18
+        env:
+          POSTGRES_USER: azync
+          POSTGRES_PASSWORD: azync
+          POSTGRES_DB: azync
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Set up Go
+        uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+          cache: false
+
+      - name: Download dependencies
+        working-directory: driver/azyncpgx
+        run: go mod download
+
+      - name: Check go mod tidy
+        working-directory: driver/azyncpgx
+        env:
+          GOWORK: off
+        run: |
+          go mod tidy
+          git diff --exit-code -- go.mod go.sum
+
+      - name: Build
+        working-directory: driver/azyncpgx
+        run: go build ./...
+
+      - name: Test
+        working-directory: driver/azyncpgx
+        run: go test -v -race -coverprofile=coverage.out ./...
+
+      - name: Upload coverage
+        uses: codecov/codecov-action@v7
+        continue-on-error: true
+        with:
+          files: driver/azyncpgx/coverage.out
+          flags: driver-azyncpgx
+          fail_ci_if_error: false
+          token: ${{ secrets.CODECOV_TOKEN }}

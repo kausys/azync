@@ -1,0 +1,15 @@
+services:
+  postgres:
+    image: postgres:18
+    environment:
+      POSTGRES_USER: azync
+      POSTGRES_PASSWORD: azync
+      POSTGRES_DB: azync
+    ports:
+      - "5432:5432"
+    # Gives `docker compose up --wait` (run.sh db-up) a real readiness signal.
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U azync -d azync"]
+      interval: 2s
+      timeout: 3s
+      retries: 15

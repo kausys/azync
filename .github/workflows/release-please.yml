@@ -1,0 +1,57 @@
+name: Release Please
+
+on:
+  push:
+    branches:
+      - main
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  release-please:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Generate App token
+        id: app-token
+        uses: actions/create-github-app-token@v3
+        with:
+          client-id: ${{ secrets.GH_APP_ID }}
+          private-key: ${{ secrets.GH_APP_PRIVATE_KEY }}
+
+      - uses: googleapis/release-please-action@v5
+        id: release
+        with:
+          config-file: release-please-config.json
+          manifest-file: .release-please-manifest.json
+          token: ${{ steps.app-token.outputs.token }}
+
+      # release-please manages the root module (tag vX.Y.Z). Mirror that exact
+      # version onto the driver/azyncpgx submodule (tag driver/azyncpgx/vX.Y.Z) so
+      # both Go modules always release in lockstep at the same version. Done here
+      # rather than via release-please components because linked-versions cannot
+      # keep identical versions when include-component-in-tag=false
+      # (googleapis/release-please#1750), which the root's plain vX.Y.Z tag needs.
+      - name: Mirror release tag to the driver/azyncpgx submodule
+        if: ${{ steps.release.outputs.release_created }}
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+        run: |
+          REF="refs/tags/driver/azyncpgx/${{ steps.release.outputs.tag_name }}"
+          set +e
+          out=$(gh api "repos/${{ github.repository }}/git/refs" \
+            -f ref="${REF}" \
+            -f sha="${{ steps.release.outputs.sha }}" 2>&1)
+          code=$?
+          set -e
+          if [ "${code}" -eq 0 ]; then
+            echo "created ${REF}"
+            exit 0
+          fi
+          if echo "${out}" | grep -qi 'Reference already exists'; then
+            echo "${REF} already exists — skip"
+            exit 0
+          fi
+          echo "${out}"
+          exit "${code}"
