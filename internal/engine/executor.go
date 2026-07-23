@@ -2,6 +2,7 @@ package engine
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"log/slog"
 	"runtime/debug"
@@ -45,9 +46,9 @@ func (e *Engine) execute(jobsCtx context.Context, k Kind, job driver.Job, releas
 	defer cancelLease()
 	go e.renewLease(ctx, job.ID, job.LeaseToken, cancelLease)
 
-	err := e.runHandler(ctx, k, job)
+	result, err := e.runHandler(ctx, k, job)
 	if err == nil {
-		if ackErr := e.store.Ack(context.WithoutCancel(ctx), job.ID, job.LeaseToken); ackErr != nil {
+		if ackErr := e.acker(context.WithoutCancel(ctx), job.ID, job.LeaseToken, result); ackErr != nil {
 			logSettleError(e.logger, ackErr, "ack failed", "job", job.ID.String(), "error", ackErr)
 		}
 		return
@@ -57,10 +58,12 @@ func (e *Engine) execute(jobsCtx context.Context, k Kind, job driver.Job, releas
 	e.settleFailure(context.WithoutCancel(ctx), k, job, err)
 }
 
-// settleFailure lands a failed execution: Abort or an exhausted budget goes to
-// the dead letter; everything else reschedules after the classified delay (or
-// the exponential backoff). Settle errors are logged, never fatal: a stale
-// lease token means another worker already owns the job.
+// settleFailure lands a failed execution: Snooze parks the job budget-free
+// (checked before exhaustion — a snooze never consumes an attempt, so it can
+// never dead-letter); Abort or an exhausted budget goes to the dead letter;
+// everything else reschedules after the classified delay (or the exponential
+// backoff). Settle errors are logged, never fatal: a stale lease token means
+// another worker already owns the job.
 func (e *Engine) settleFailure(ctx context.Context, k Kind, job driver.Job, err error) {
 	logger := e.logger.With("job", job.ID.String(), "kind", job.Kind, "attempt", job.Attempt)
 
@@ -68,6 +71,12 @@ func (e *Engine) settleFailure(ctx context.Context, k Kind, job driver.Job, err 
 	exhausted := job.Attempt >= job.MaxAttempts
 
 	switch {
+	case o.Kind == OutcomeSnooze:
+		if sErr := e.store.Snooze(ctx, job.ID, job.LeaseToken, o.Delay); sErr != nil {
+			logSettleError(logger, sErr, "snooze failed", "error", sErr)
+		}
+		logger.Debug("job snoozed", "delay", o.Delay, "error", err)
+
 	case o.Kind == OutcomeAbort:
 		if dErr := e.store.Dead(ctx, job.ID, job.LeaseToken, err.Error()); dErr != nil {
 			logSettleError(logger, dErr, "dead-letter failed", "error", dErr)
@@ -112,9 +121,12 @@ func logSettleError(logger *slog.Logger, err error, msg string, args ...any) {
 // becomes an ordinary handler error (stack attached) and settles through the
 // normal failure path, so it is retried and eventually dead-lettered like any
 // other failure.
-func (e *Engine) runHandler(ctx context.Context, k Kind, job driver.Job) (err error) {
+//
+//nolint:nonamedreturns // the deferred recover must overwrite both returns
+func (e *Engine) runHandler(ctx context.Context, k Kind, job driver.Job) (result json.RawMessage, err error) {
 	defer func() {
 		if r := recover(); r != nil {
+			result = nil
 			err = fmt.Errorf("handler panic: %v\n%s", r, debug.Stack())
 			e.logger.Error("handler panicked",
 				"job", job.ID.String(), "kind", job.Kind, "panic", r)

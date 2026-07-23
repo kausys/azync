@@ -71,8 +71,10 @@ func RegisterKind(w *Worker, kind string, handler func(ctx context.Context, payl
 		MaxAttempts:    o.maxRetries,
 		MaxAttemptsSet: o.maxRetriesSet,
 		Classify:       classify,
-		Handler: func(ctx context.Context, job driver.Job) error {
-			return handler(NewContext(ctx, jobInfoFrom(job)), job.Payload)
+		Handler: func(ctx context.Context, job driver.Job) (json.RawMessage, error) {
+			// Queue handlers produce no result; the engine's default acker
+			// ignores it.
+			return nil, handler(NewContext(ctx, jobInfoFrom(job)), job.Payload)
 		},
 	})
 	if err != nil {

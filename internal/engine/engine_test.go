@@ -54,9 +54,9 @@ func TestStartProcessesJobEndToEnd(t *testing.T) {
 
 	done := make(chan uuid.UUID, 1)
 	is.NoError(e.Register(Kind{Name: "send", Concurrency: 2,
-		Handler: func(_ context.Context, job driver.Job) error {
+		Handler: func(_ context.Context, job driver.Job) (json.RawMessage, error) {
 			done <- job.ID
-			return nil
+			return nil, nil
 		}}))
 
 	id := enqueue(t, f, "send")
@@ -85,9 +85,9 @@ func TestWakeNudgesIdleFetchLoop(t *testing.T) {
 
 	done := make(chan struct{}, 1)
 	is.NoError(e.Register(Kind{Name: "send", Concurrency: 1,
-		Handler: func(context.Context, driver.Job) error {
+		Handler: func(context.Context, driver.Job) (json.RawMessage, error) {
 			done <- struct{}{}
-			return nil
+			return nil, nil
 		}}))
 
 	startEngine(t, e)
@@ -119,7 +119,7 @@ func TestPerKindConcurrencyIsRespected(t *testing.T) {
 	var processed atomic.Int32
 	allDone := make(chan struct{})
 	is.NoError(e.Register(Kind{Name: "slow", Concurrency: concurrency,
-		Handler: func(context.Context, driver.Job) error {
+		Handler: func(context.Context, driver.Job) (json.RawMessage, error) {
 			cur := inflight.Add(1)
 			for {
 				prev := maxInflight.Load()
@@ -132,7 +132,7 @@ func TestPerKindConcurrencyIsRespected(t *testing.T) {
 			if processed.Add(1) == jobs {
 				close(allDone)
 			}
-			return nil
+			return nil, nil
 		}}))
 
 	for range jobs {
@@ -160,7 +160,7 @@ func TestGlobalConcurrencyCapsAcrossKinds(t *testing.T) {
 	var inflight, maxInflight atomic.Int32
 	var processed atomic.Int32
 	allDone := make(chan struct{})
-	handler := func(context.Context, driver.Job) error {
+	handler := func(context.Context, driver.Job) (json.RawMessage, error) {
 		cur := inflight.Add(1)
 		for {
 			prev := maxInflight.Load()
@@ -173,7 +173,7 @@ func TestGlobalConcurrencyCapsAcrossKinds(t *testing.T) {
 		if processed.Add(1) == 4 {
 			close(allDone)
 		}
-		return nil
+		return nil, nil
 	}
 	is.NoError(e.Register(Kind{Name: "a", Concurrency: 2, Handler: handler}))
 	is.NoError(e.Register(Kind{Name: "b", Concurrency: 2, Handler: handler}))
@@ -204,14 +204,14 @@ func TestShutdownDrainsInflightJob(t *testing.T) {
 	started := make(chan struct{}, 1)
 	var canceled atomic.Bool
 	is.NoError(e.Register(Kind{Name: "slow", Concurrency: 1,
-		Handler: func(ctx context.Context, _ driver.Job) error {
+		Handler: func(ctx context.Context, _ driver.Job) (json.RawMessage, error) {
 			started <- struct{}{}
 			select {
 			case <-time.After(100 * time.Millisecond):
 			case <-ctx.Done():
 				canceled.Store(true)
 			}
-			return nil
+			return nil, nil
 		}}))
 
 	id := enqueue(t, f, "slow")
@@ -240,11 +240,11 @@ func TestShutdownCancelsJobsPastDrainBudget(t *testing.T) {
 	started := make(chan struct{}, 1)
 	handlerCanceled := make(chan struct{})
 	is.NoError(e.Register(Kind{Name: "stuck", Concurrency: 1,
-		Handler: func(ctx context.Context, _ driver.Job) error {
+		Handler: func(ctx context.Context, _ driver.Job) (json.RawMessage, error) {
 			started <- struct{}{}
 			<-ctx.Done() // only the drain cancellation releases this handler
 			close(handlerCanceled)
-			return ctx.Err()
+			return nil, ctx.Err()
 		}}))
 
 	enqueue(t, f, "stuck")
@@ -338,7 +338,7 @@ func TestRegisterDuplicateAndAfterStart(t *testing.T) {
 	f := drivertest.NewFake()
 	e := newTestEngine(f, testSettings())
 
-	handler := func(context.Context, driver.Job) error { return nil }
+	handler := func(context.Context, driver.Job) (json.RawMessage, error) { return nil, nil }
 	is.NoError(e.Register(Kind{Name: "send", Concurrency: 1, Handler: handler}))
 	err := e.Register(Kind{Name: "send", Concurrency: 1, Handler: handler})
 	is.Error(err)
@@ -366,11 +366,11 @@ func TestRenewLeaseKeepsLongJobAlive(t *testing.T) {
 	var runs atomic.Int32
 	done := make(chan struct{}, 4)
 	is.NoError(e.Register(Kind{Name: "long", Concurrency: 1,
-		Handler: func(context.Context, driver.Job) error {
+		Handler: func(context.Context, driver.Job) (json.RawMessage, error) {
 			runs.Add(1)
 			time.Sleep(300 * time.Millisecond) // three lease TTLs
 			done <- struct{}{}
-			return nil
+			return nil, nil
 		}}))
 
 	id := enqueue(t, f, "long")
@@ -403,10 +403,10 @@ func TestRenewLeaseFailureCancelsHandler(t *testing.T) {
 
 	handlerCanceled := make(chan struct{})
 	k := Kind{Name: "held", Concurrency: 1,
-		Handler: func(ctx context.Context, _ driver.Job) error {
+		Handler: func(ctx context.Context, _ driver.Job) (json.RawMessage, error) {
 			<-ctx.Done() // only a renew failure can cancel this ctx
 			close(handlerCanceled)
-			return ctx.Err()
+			return nil, ctx.Err()
 		},
 		Classify: retryClassifier(Outcome{Kind: OutcomeRetry}),
 	}

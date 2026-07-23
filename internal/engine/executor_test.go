@@ -78,9 +78,9 @@ func TestExecuteSuccessAcksAndRetainsSucceeded(t *testing.T) {
 
 	job := leaseOne(t, f, "send", 5)
 	ran := false
-	k := Kind{Name: "send", Concurrency: 1, Handler: func(context.Context, driver.Job) error {
+	k := Kind{Name: "send", Concurrency: 1, Handler: func(context.Context, driver.Job) (json.RawMessage, error) {
 		ran = true
-		return nil
+		return nil, nil
 	}}
 	e.execute(context.Background(), k, job, func() {})
 
@@ -100,7 +100,7 @@ func TestExecutePlainErrorReschedulesWithBackoff(t *testing.T) {
 
 	job := leaseOne(t, f, "send", 5)
 	k := Kind{Name: "send", Concurrency: 1,
-		Handler:  func(context.Context, driver.Job) error { return errors.New("boom") },
+		Handler:  func(context.Context, driver.Job) (json.RawMessage, error) { return nil, errors.New("boom") },
 		Classify: retryClassifier(Outcome{Kind: OutcomeRetry}),
 	}
 	e.execute(context.Background(), k, job, func() {})
@@ -122,7 +122,7 @@ func TestExecuteClassifiedDelayWinsOverBackoff(t *testing.T) {
 	job := leaseOne(t, f, "send", 5)
 	delay := 42 * time.Second
 	k := Kind{Name: "send", Concurrency: 1,
-		Handler:  func(context.Context, driver.Job) error { return errors.New("later") },
+		Handler:  func(context.Context, driver.Job) (json.RawMessage, error) { return nil, errors.New("later") },
 		Classify: retryClassifier(Outcome{Kind: OutcomeRetry, Delay: delay}),
 	}
 	e.execute(context.Background(), k, job, func() {})
@@ -140,7 +140,7 @@ func TestExecuteAbortDeadLetters(t *testing.T) {
 
 	job := leaseOne(t, f, "send", 5)
 	k := Kind{Name: "send", Concurrency: 1,
-		Handler:  func(context.Context, driver.Job) error { return errors.New("permanent") },
+		Handler:  func(context.Context, driver.Job) (json.RawMessage, error) { return nil, errors.New("permanent") },
 		Classify: retryClassifier(Outcome{Kind: OutcomeAbort}),
 	}
 	e.execute(context.Background(), k, job, func() {})
@@ -160,7 +160,7 @@ func TestExecuteExhaustedBudgetDeadLetters(t *testing.T) {
 	// classifier says retry.
 	job := leaseOne(t, f, "send", 1)
 	k := Kind{Name: "send", Concurrency: 1,
-		Handler:  func(context.Context, driver.Job) error { return errors.New("boom") },
+		Handler:  func(context.Context, driver.Job) (json.RawMessage, error) { return nil, errors.New("boom") },
 		Classify: retryClassifier(Outcome{Kind: OutcomeRetry}),
 	}
 	e.execute(context.Background(), k, job, func() {})
@@ -177,7 +177,7 @@ func TestExecuteExhaustedReportableStillDeadLetters(t *testing.T) {
 
 	job := leaseOne(t, f, "send", 1)
 	k := Kind{Name: "send", Concurrency: 1,
-		Handler:  func(context.Context, driver.Job) error { return errors.New("loud") },
+		Handler:  func(context.Context, driver.Job) (json.RawMessage, error) { return nil, errors.New("loud") },
 		Classify: retryClassifier(Outcome{Kind: OutcomeRetry, Reportable: true}),
 	}
 	e.execute(context.Background(), k, job, func() {})
@@ -198,14 +198,14 @@ func TestExecuteStaleLeaseTokenIsSwallowed(t *testing.T) {
 	// Settle the job out from under the executor: its token goes stale.
 	is.NoError(f.Ack(ctx, job.ID, job.LeaseToken))
 
-	k := Kind{Name: "send", Concurrency: 1, Handler: func(context.Context, driver.Job) error {
-		return nil
+	k := Kind{Name: "send", Concurrency: 1, Handler: func(context.Context, driver.Job) (json.RawMessage, error) {
+		return nil, nil
 	}}
 	// Must not panic and must return; the not-found settle error is logged only.
 	e.execute(ctx, k, job, func() {})
 
 	failing := Kind{Name: "send", Concurrency: 1,
-		Handler:  func(context.Context, driver.Job) error { return errors.New("boom") },
+		Handler:  func(context.Context, driver.Job) (json.RawMessage, error) { return nil, errors.New("boom") },
 		Classify: retryClassifier(Outcome{Kind: OutcomeRetry}),
 	}
 	e.execute(ctx, failing, job, func() {})
@@ -222,9 +222,9 @@ func TestExecuteSettlementSurvivesHandlerTimeout(t *testing.T) {
 
 	job := leaseOne(t, f, "send", 5)
 	k := Kind{Name: "send", Concurrency: 1, Timeout: 10 * time.Millisecond,
-		Handler: func(ctx context.Context, _ driver.Job) error {
+		Handler: func(ctx context.Context, _ driver.Job) (json.RawMessage, error) {
 			<-ctx.Done() // block until the per-job timeout fires
-			return ctx.Err()
+			return nil, ctx.Err()
 		},
 		Classify: retryClassifier(Outcome{Kind: OutcomeRetry}),
 	}
@@ -245,7 +245,7 @@ func TestExecuteHandlerPanicIsRecoveredAndRetried(t *testing.T) {
 
 	job := leaseOne(t, f, "send", 5)
 	k := Kind{Name: "send", Concurrency: 1,
-		Handler:  func(context.Context, driver.Job) error { panic("kaboom") },
+		Handler:  func(context.Context, driver.Job) (json.RawMessage, error) { panic("kaboom") },
 		Classify: retryClassifier(Outcome{Kind: OutcomeRetry}),
 	}
 	released := false
@@ -267,7 +267,7 @@ func TestExecuteHandlerPanicExhaustedBudgetDeadLetters(t *testing.T) {
 
 	job := leaseOne(t, f, "send", 1)
 	k := Kind{Name: "send", Concurrency: 1,
-		Handler:  func(context.Context, driver.Job) error { panic("kaboom") },
+		Handler:  func(context.Context, driver.Job) (json.RawMessage, error) { panic("kaboom") },
 		Classify: retryClassifier(Outcome{Kind: OutcomeRetry}),
 	}
 	is.NotPanics(func() { e.execute(context.Background(), k, job, func() {}) })
@@ -283,9 +283,9 @@ func TestExecuteReleaseIsCalledOnEveryPath(t *testing.T) {
 	f := drivertest.NewFake()
 	e := newTestEngine(f, testSettings())
 
-	for _, handler := range []func(context.Context, driver.Job) error{
-		func(context.Context, driver.Job) error { return nil },
-		func(context.Context, driver.Job) error { return errors.New("boom") },
+	for _, handler := range []func(context.Context, driver.Job) (json.RawMessage, error){
+		func(context.Context, driver.Job) (json.RawMessage, error) { return nil, nil },
+		func(context.Context, driver.Job) (json.RawMessage, error) { return nil, errors.New("boom") },
 	} {
 		job := leaseOne(t, f, "send", 5)
 		released := false

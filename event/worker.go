@@ -2,6 +2,7 @@ package event
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -187,20 +188,21 @@ func (w *Worker) reset() {
 // A delivery whose ledger record is absent (which Publish never produces), or
 // whose type has no binding (only the bound types are ever registered), is
 // dead-lettered as a permanent error rather than panicking.
-func (w *Worker) deliver(sub subRegistration) func(context.Context, driver.Job) error {
-	return func(ctx context.Context, job driver.Job) error {
+// Event handlers produce no result; the engine's default acker ignores it.
+func (w *Worker) deliver(sub subRegistration) func(context.Context, driver.Job) (json.RawMessage, error) {
+	return func(ctx context.Context, job driver.Job) (json.RawMessage, error) {
 		if job.Event == nil {
 			w.logger.Error("event delivery has no ledger record; dead-lettering",
 				"delivery", job.ID.String(), "subscriber", sub.name)
-			return Permanent(errors.New("event: delivery has no ledger record"))
+			return nil, Permanent(errors.New("event: delivery has no ledger record"))
 		}
 		b, ok := sub.bindings[job.Event.Type]
 		if !ok {
 			w.logger.Error("event delivery has no binding for its type; dead-lettering",
 				"delivery", job.ID.String(), "subscriber", sub.name, "type", job.Event.Type)
-			return Permanent(fmt.Errorf("event: subscriber %q has no binding for event type %q",
+			return nil, Permanent(fmt.Errorf("event: subscriber %q has no binding for event type %q",
 				sub.name, job.Event.Type))
 		}
-		return b.invoke(NewContext(ctx, deliveryFrom(job)), job.Event.Payload)
+		return nil, b.invoke(NewContext(ctx, deliveryFrom(job)), job.Event.Payload)
 	}
 }
