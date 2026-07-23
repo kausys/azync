@@ -88,6 +88,15 @@ type Store interface {
 	// lease token.
 	Release(ctx context.Context, id, leaseToken uuid.UUID) error
 
+	// Snooze parks an active job as StateScheduled with run_at now()+delay,
+	// decrementing attempt by one (floored at zero) so the lease it hands back
+	// never consumes the retry budget, and without recording an attempt. It is
+	// the polling-wait primitive ("the resource is not ready, re-check in d"):
+	// a handler can snooze indefinitely without ever exhausting its retries.
+	// Fenced by lease token: it returns a not-found error (see IsNotFound)
+	// when the token no longer owns an active row.
+	Snooze(ctx context.Context, id, leaseToken uuid.UUID, delay time.Duration) error
+
 	// ExtendLease renews an active job's lease for the duration. Fenced by lease
 	// token: it returns a not-found error once the token no longer owns the row.
 	ExtendLease(ctx context.Context, id, leaseToken uuid.UUID, lease time.Duration) error

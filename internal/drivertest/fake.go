@@ -40,6 +40,8 @@ type Fake struct {
 	attempts    map[uuid.UUID][]driver.AttemptError
 	stats       map[statKey]*statCounters
 	leaders     map[string]bool
+	workflows   map[uuid.UUID]*fakeWorkflow
+	jobSeq      int64 // creation-order counter, stamped onto every job
 
 	wakeMu sync.Mutex
 	wakers []chan driver.Wake
@@ -56,15 +58,25 @@ func NewFake() *Fake {
 		attempts:    map[uuid.UUID][]driver.AttemptError{},
 		stats:       map[statKey]*statCounters{},
 		leaders:     map[string]bool{},
+		workflows:   map[uuid.UUID]*fakeWorkflow{},
 	}
 }
 
-// fakeJob is the internal job record: the wire Job plus the two columns the
-// contract does not expose (the resolved-budget flag and the idempotency key).
+// fakeJob is the internal job record: the wire Job plus the columns the
+// contract does not expose (the resolved-budget flag, the idempotency key and
+// the workflow-task extras the scheduler needs).
 type fakeJob struct {
 	driver.Job
 	maxAttemptsExplicit bool
 	idempotencyKey      string
+	// compensationPayload is the declared compensation body, inserted as the
+	// "comp:<key>" task's payload when the workflow compensates.
+	compensationPayload json.RawMessage
+	// sleepFor is the KindSleep duration, resolved against the store clock
+	// when the timer starts.
+	sleepFor time.Duration
+	// seq is the global creation-order stamp backing WorkflowTasks ordering.
+	seq int64
 }
 
 type subKey struct {
@@ -131,11 +143,18 @@ func dayOf(t time.Time) time.Time {
 	return time.Date(u.Year(), u.Month(), u.Day(), 0, 0, 0, 0, time.UTC)
 }
 
+// nextSeq mints the next creation-order stamp. Callers hold f.mu.
+func (f *Fake) nextSeq() int64 {
+	f.jobSeq++
+	return f.jobSeq
+}
+
 // toJob returns a defensive copy so callers cannot mutate the stored record.
 func (j *fakeJob) toJob() driver.Job {
 	out := j.Job
 	out.Payload = clonePayload(j.Payload)
 	out.Meta = cloneMeta(j.Meta)
+	out.Result = clonePayload(j.Result)
 	out.Event = nil
 	return out
 }
@@ -233,6 +252,7 @@ func (f *Fake) enqueueLocked(p driver.EnqueueParams) (bool, error) {
 		},
 		maxAttemptsExplicit: p.MaxAttemptsExplicit,
 		idempotencyKey:      p.IdempotencyKey,
+		seq:                 f.nextSeq(),
 	}
 	f.bumpStat(driver.SourceQueue, p.Kind, statEnqueued, 1, now)
 	if state == driver.StatePending {
@@ -292,6 +312,7 @@ func (f *Fake) createDelivery(eventID uuid.UUID, subscriber string, maxAttempts 
 		// Event deliveries carry an explicit per-subscriber budget, so the
 		// queue-style first-lease default override never touches them.
 		maxAttemptsExplicit: true,
+		seq:                 f.nextSeq(),
 	}
 	f.bumpStat(driver.SourceEvent, subscriber, statEnqueued, 1, now)
 	f.wake(driver.SourceEvent, subscriber)
@@ -318,6 +339,7 @@ func (f *Fake) SeedOrphanDelivery(deliveryID uuid.UUID, subscriber string) {
 			EnqueuedAt:  now,
 		},
 		maxAttemptsExplicit: true,
+		seq:                 f.nextSeq(),
 	}
 	f.bumpStat(driver.SourceEvent, subscriber, statEnqueued, 1, now)
 	f.wake(driver.SourceEvent, subscriber)
@@ -487,6 +509,24 @@ func (f *Fake) Release(_ context.Context, id, leaseToken uuid.UUID) error {
 	j.LeaseUntil = time.Time{}
 	j.RunAt = now
 	f.wake(j.Source, j.Kind)
+	return nil
+}
+
+// Snooze parks an active job as scheduled after delay without consuming the
+// retry budget: the attempt of the lease being handed back is decremented and
+// no attempt history is recorded (polling-wait semantics).
+func (f *Fake) Snooze(_ context.Context, id, leaseToken uuid.UUID, delay time.Duration) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	j, err := f.settle("snooze", id, leaseToken)
+	if err != nil {
+		return err
+	}
+	j.State = driver.StateScheduled
+	j.RunAt = f.now().Add(delay)
+	j.Attempt = max(j.Attempt-1, 0)
+	j.LeaseToken = uuid.Nil
+	j.LeaseUntil = time.Time{}
 	return nil
 }
 
@@ -1245,6 +1285,9 @@ func addDepth(d *driver.Depths, state driver.JobState) {
 		d.Paused++
 	case driver.StateSucceeded:
 		d.Succeeded++
+	default:
+		// The workflow-only states (blocked, waiting, cancelled) have no
+		// Depths counter; the contract's Depths struct predates them.
 	}
 }
 

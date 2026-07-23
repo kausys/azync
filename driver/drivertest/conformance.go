@@ -44,6 +44,7 @@ func RunConformance(t *testing.T, newStore func(t *testing.T) driver.Store) {
 	t.Run("Enqueue", func(t *testing.T) { runEnqueue(t, store) })
 	t.Run("Dequeue", func(t *testing.T) { runDequeue(t, store) })
 	t.Run("Settlement", func(t *testing.T) { runSettlement(t, store) })
+	t.Run("Snooze", func(t *testing.T) { runSnooze(t, store) })
 	t.Run("ReapExpired", func(t *testing.T) { runReap(t, store) })
 	t.Run("PromoteDue", func(t *testing.T) { runPromoteDue(t, store) })
 	t.Run("Publish", func(t *testing.T) { runPublish(t, store) })
@@ -371,6 +372,59 @@ func runSettlement(t *testing.T, store driver.Store) {
 		is.NoError(store.ExtendLease(ctx, leased[0].ID, leased[0].LeaseToken, 30*time.Second))
 		got := getJob(ctx, t, store, driver.SourceQueue, id)
 		is.True(got.LeaseUntil.After(leased[0].LeaseUntil), "the lease deadline moved further out")
+	})
+}
+
+// ---- Snooze ---------------------------------------------------------------
+
+func runSnooze(t *testing.T, store driver.Store) {
+	t.Helper()
+	ctx := context.Background()
+
+	t.Run("reschedules without consuming the attempt", func(t *testing.T) {
+		is := require.New(t)
+		id := enqueueDue(ctx, t, store, "snz_basic")
+		leased := dequeueN(ctx, t, store, driver.SourceQueue, "snz_basic", 1, time.Minute)
+		is.Len(leased, 1)
+		is.Equal(1, leased[0].Attempt)
+
+		is.NoError(store.Snooze(ctx, leased[0].ID, leased[0].LeaseToken, time.Hour))
+		got := getJob(ctx, t, store, driver.SourceQueue, id)
+		is.Equal(driver.StateScheduled, got.State)
+		is.Equal(0, got.Attempt, "snooze hands back the attempt: the budget is not consumed")
+		is.True(got.RunAt.After(time.Now().Add(30*time.Minute)), "run_at reflects the snooze delay on the backend clock")
+		attempts, err := store.JobAttempts(ctx, driver.SourceQueue, id)
+		is.NoError(err)
+		is.Empty(attempts, "snooze records no attempt history")
+	})
+
+	t.Run("stale token is fenced", func(t *testing.T) {
+		is := require.New(t)
+		id := enqueueDue(ctx, t, store, "snz_fence")
+		leased := dequeueN(ctx, t, store, driver.SourceQueue, "snz_fence", 1, time.Minute)
+		is.Len(leased, 1)
+		is.NoError(store.Ack(ctx, leased[0].ID, leased[0].LeaseToken))
+		err := store.Snooze(ctx, id, leased[0].LeaseToken, time.Minute)
+		is.True(driver.IsNotFound(err), "a stale snooze is fenced")
+		is.Equal(driver.StateSucceeded, getJob(ctx, t, store, driver.SourceQueue, id).State, "the earlier Ack stands")
+	})
+
+	t.Run("a zero delay is immediately due again", func(t *testing.T) {
+		is := require.New(t)
+		id := enqueueDue(ctx, t, store, "snz_due")
+		first := dequeueN(ctx, t, store, driver.SourceQueue, "snz_due", 1, time.Minute)
+		is.Len(first, 1)
+		is.NoError(store.Snooze(ctx, first[0].ID, first[0].LeaseToken, 0))
+
+		// run_at was stamped at the backend clock's now(), so the job promotes
+		// and re-leases immediately regardless of host/DB clock skew.
+		promoted, err := store.PromoteDue(ctx, driver.SourceQueue, []string{"snz_due"})
+		is.NoError(err)
+		is.Equal(int64(1), promoted)
+		second := dequeueN(ctx, t, store, driver.SourceQueue, "snz_due", 1, time.Minute)
+		is.Len(second, 1)
+		is.Equal(id, second[0].ID)
+		is.Equal(1, second[0].Attempt, "the re-lease is attempt 1 again: the snoozed lease never counted")
 	})
 }
 

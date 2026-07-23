@@ -63,6 +63,11 @@ func (UnimplementedStore) Release(context.Context, uuid.UUID, uuid.UUID) error {
 	return ErrNotSupported
 }
 
+// Snooze reports ErrNotSupported.
+func (UnimplementedStore) Snooze(context.Context, uuid.UUID, uuid.UUID, time.Duration) error {
+	return ErrNotSupported
+}
+
 // ExtendLease reports ErrNotSupported.
 func (UnimplementedStore) ExtendLease(context.Context, uuid.UUID, uuid.UUID, time.Duration) error {
 	return ErrNotSupported

@@ -7,8 +7,9 @@
 // are [time.Duration] values that each backend resolves against its own clock,
 // and identifiers are opaque. A driver that implements only [Store] is fully
 // functional through polling; the optional capabilities ([Notifier],
-// [LeaderElector], [Migrator], [TxStore]) unlock push wakeups, leader-elected
-// cron, migrations and transactional enqueues respectively.
+// [LeaderElector], [Migrator], [TxStore], [WorkflowStore], [TxWorkflowStore])
+// unlock push wakeups, leader-elected cron, migrations, transactional
+// enqueues and DAG workflows respectively.
 package driver
 
 import (
@@ -29,7 +30,9 @@ const (
 	// SourceEvent tags event deliveries fanned out by Publish; one such job per
 	// matching subscriber, rehydrated from the event ledger on dequeue.
 	SourceEvent Source = "event"
-	// SourceWorkflow arrives additively in v2 for DAG tasks in the same table.
+	// SourceWorkflow tags DAG tasks created through the WorkflowStore
+	// capability; they share the unified job table and settlement machinery.
+	SourceWorkflow Source = "workflow"
 )
 
 // JobState is the persisted lifecycle state of a job.
@@ -52,6 +55,15 @@ const (
 	// (not deleted) until VacuumCompleted trims them, so the ops UI can show a
 	// success history.
 	StateSucceeded JobState = "succeeded"
+	// StateBlocked marks a workflow task whose dependencies are not all
+	// satisfied yet; PromoteUnblocked releases it (SourceWorkflow only).
+	StateBlocked JobState = "blocked"
+	// StateWaiting marks a workflow signal task parked until Signal completes
+	// it (SourceWorkflow only).
+	StateWaiting JobState = "waiting"
+	// StateCancelled is the terminal state of a workflow task cancelled by the
+	// failure policy or an operator verb (SourceWorkflow only).
+	StateCancelled JobState = "cancelled"
 )
 
 // EnqueueParams is the durable input for a single queue job (Source
@@ -191,6 +203,25 @@ type Job struct {
 	// Event is the rehydrated ledger record, populated by DequeueBatch for
 	// Source SourceEvent jobs and nil otherwise.
 	Event *EventRecord
+	// WorkflowID links a workflow task to its workflow header; uuid.Nil for
+	// non-workflow jobs. The remaining workflow fields below are likewise zero
+	// for every source but SourceWorkflow.
+	WorkflowID uuid.UUID
+	// TaskKey is the task's key within its workflow DAG ("comp:<key>" for a
+	// compensation task).
+	TaskKey string
+	// Result is the task's persisted output (from AckTaskResult, or the signal
+	// payload for a completed KindSignal task). Nil until the task succeeds
+	// with a result.
+	Result json.RawMessage
+	// SignalName is the signal this task reacts to, if any.
+	SignalName string
+	// CompensationKind is the declared compensation kind, empty when the task
+	// declared none.
+	CompensationKind string
+	// IgnoreDeadDeps marks the task promotable over dead or cancelled
+	// dependencies.
+	IgnoreDeadDeps bool
 	// EnqueuedAt, FailedAt and CompletedAt are lifecycle timestamps; the latter
 	// two are zero until the corresponding transition occurs.
 	EnqueuedAt  time.Time

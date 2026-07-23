@@ -20,3 +20,20 @@ func newFakeStore(t *testing.T) driver.Store {
 func TestConformanceFake(t *testing.T) {
 	drivertest.RunConformance(t, newFakeStore)
 }
+
+// TestWorkflowConformanceFake runs the workflow-capability conformance suite
+// against the in-memory fake, which implements driver.WorkflowStore in full as
+// the behavioral oracle for the workflow runtime.
+func TestWorkflowConformanceFake(t *testing.T) {
+	drivertest.RunWorkflowConformance(t, newFakeStore)
+}
+
+// TestWorkflowConformanceSkipsWithoutCapability proves the workflow suite
+// skips cleanly (instead of failing) for a store that does not implement the
+// optional driver.WorkflowStore capability.
+func TestWorkflowConformanceSkipsWithoutCapability(t *testing.T) {
+	drivertest.RunWorkflowConformance(t, func(t *testing.T) driver.Store {
+		t.Helper()
+		return driver.UnimplementedStore{}
+	})
+}

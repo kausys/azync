@@ -358,6 +358,23 @@ func (s *Store) Release(ctx context.Context, id, leaseToken uuid.UUID) error {
 	return s.requireRow(ctx, "release", releaseSQL, id, leaseToken)
 }
 
+// snoozeSQL implements the polling-wait primitive: back to scheduled on the
+// backend clock, handing back the attempt this lease charged (floored at zero)
+// so snoozing never consumes the retry budget, with no attempts row.
+const snoozeSQL = `
+UPDATE azync_jobs SET
+	state = 'scheduled', run_at = now() + make_interval(secs => $3),
+	attempt = GREATEST(attempt - 1, 0),
+	lease_until = NULL, lease_token = NULL, updated_at = now()
+WHERE id = $1 AND state = 'active' AND lease_token = $2`
+
+// Snooze parks an active job as StateScheduled with run_at now()+delay without
+// consuming the retry budget and without recording an attempt. Fenced by lease
+// token.
+func (s *Store) Snooze(ctx context.Context, id, leaseToken uuid.UUID, delay time.Duration) error {
+	return s.requireRow(ctx, "snooze", snoozeSQL, id, leaseToken, delay.Seconds())
+}
+
 const extendLeaseSQL = `
 UPDATE azync_jobs SET lease_until = now() + make_interval(secs => $3), updated_at = now()
 WHERE id = $1 AND state = 'active' AND lease_token = $2`
