@@ -68,6 +68,12 @@ func (f *Fake) CreateWorkflow(_ context.Context, p driver.WorkflowParams) (bool,
 		}
 	}
 
+	// PRIMARY KEY (id): a caller reusing an id is a hard error, mirroring the
+	// SQL insert's PK violation — never a silent overwrite.
+	if _, exists := f.workflows[p.ID]; exists {
+		return false, uuid.Nil, fmt.Errorf("drivertest: workflow id %s already exists", p.ID)
+	}
+
 	// UNIQUE (workflow_id, task_key): validated before any insert so creation
 	// stays all-or-nothing like the SQL transaction.
 	seen := make(map[string]bool, len(p.Tasks))
@@ -448,11 +454,13 @@ func (f *Fake) insertCompensationsLocked(w *fakeWorkflow, now time.Time) int {
 	return len(candidates)
 }
 
-// CompleteWorkflows settles finished workflows: running with every task
-// succeeded lands succeeded; compensating settles once its compensation tasks
-// resolve — suspended on a dead compensation (unless the compensation was
-// cancelled through CancelWorkflow), failed when the chain finished, or
-// cancelled when it was triggered through CancelWorkflow.
+// CompleteWorkflows settles finished workflows: a running workflow whose tasks
+// are all terminal (succeeded or dead) lands succeeded when none died, or
+// failed (recording the dead task keys) when a tolerated task died; a
+// compensating workflow settles once its compensation tasks resolve — suspended
+// on a dead compensation (unless the compensation was cancelled through
+// CancelWorkflow), failed when the chain finished, or cancelled when it was
+// triggered through CancelWorkflow.
 func (f *Fake) CompleteWorkflows(_ context.Context) (int64, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
@@ -465,19 +473,34 @@ func (f *Fake) CompleteWorkflows(_ context.Context) (int64, error) {
 			if len(tasks) == 0 {
 				continue
 			}
-			done := true
+			allTerminal := true
+			var deadKeys []string
 			for _, j := range tasks {
-				if j.State != driver.StateSucceeded {
-					done = false
-					break
+				switch j.State {
+				case driver.StateSucceeded:
+				case driver.StateDead:
+					deadKeys = append(deadKeys, j.TaskKey)
+				default:
+					allTerminal = false
 				}
 			}
-			if done {
-				w.State = driver.WorkflowSucceeded
-				w.CompletedAt = now
-				w.UpdatedAt = now
-				settled++
+			if !allTerminal {
+				continue
 			}
+			if len(deadKeys) > 0 {
+				// Every dead task was tolerated (its dependents all ignore dead
+				// deps), so the policy never fired and the tolerant branches ran
+				// to completion — but something died, so the workflow is failed,
+				// honest for the operator ("finally" semantics).
+				slices.Sort(deadKeys)
+				w.State = driver.WorkflowFailed
+				w.FailureReason = "dead tasks: " + strings.Join(deadKeys, ", ")
+			} else {
+				w.State = driver.WorkflowSucceeded
+			}
+			w.CompletedAt = now
+			w.UpdatedAt = now
+			settled++
 
 		case driver.WorkflowCompensating:
 			var comps []*fakeJob

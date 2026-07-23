@@ -124,7 +124,13 @@ type WorkflowTask struct {
 	// otherwise).
 	SleepFor time.Duration
 	// IgnoreDeadDeps lets this task be promoted even when a dependency ended
-	// dead or cancelled, treating those dependencies as satisfied.
+	// dead or cancelled, treating those dependencies as satisfied. It also
+	// exempts a dead dependency from the failure policy when every dependent of
+	// that dead task declares IgnoreDeadDeps (see ApplyFailurePolicy): the
+	// tolerant branch is allowed to run instead of being cancelled. The
+	// exemption is never vacuous — a dead task with no dependents (a leaf)
+	// always triggers the policy — and a workflow that runs to completion with
+	// any dead task still settles failed, not succeeded (see CompleteWorkflows).
 	IgnoreDeadDeps bool
 }
 
@@ -222,25 +228,39 @@ type WorkflowStore interface {
 	CompleteDueSleeps(ctx context.Context) (int64, error)
 
 	// ApplyFailurePolicy applies each running workflow's OnFailure policy when
-	// it has at least one dead task (a dead task all of whose dependents
-	// declare IgnoreDeadDeps does not trigger the policy). OnFailureCancel
-	// cancels the workflow's non-terminal tasks (pending, scheduled, blocked,
-	// waiting), inserts the compensation chain — one "comp:<key>" task per
-	// succeeded task that declared a compensation, chained via dependencies in
-	// reverse completed_at order, the first pending and the rest blocked — and
-	// moves the workflow to compensating (or straight to failed when there is
-	// nothing to compensate). OnFailureSuspend moves the workflow to suspended,
-	// leaving its tasks untouched. Both record the dead tasks in
-	// FailureReason. It returns one WorkflowFailure per workflow acted on.
+	// it has at least one triggering dead task. A dead task triggers the policy
+	// unless every one of its dependents declares IgnoreDeadDeps — that lone
+	// exemption lets a fully tolerant branch keep running instead of being
+	// cancelled. The exemption is never vacuous: a dead task with no dependents
+	// (a leaf) always triggers, as there is no tolerant branch to preserve.
+	// OnFailureCancel cancels the workflow's non-terminal tasks (pending,
+	// scheduled, blocked, waiting), inserts the compensation chain — one
+	// "comp:<key>" task per succeeded task that declared a compensation, chained
+	// via dependencies in reverse completed_at order, the first pending and the
+	// rest blocked — and moves the workflow to compensating (or straight to
+	// failed when there is nothing to compensate). OnFailureSuspend moves the
+	// workflow to suspended, leaving its tasks untouched. Both record the dead
+	// tasks in FailureReason. It returns one WorkflowFailure per workflow acted
+	// on.
+	//
+	// A task that is active (leased by a worker) when the policy fires is left
+	// alone: the lease belongs to the worker, so it is neither cancelled nor
+	// compensated. Should it complete after the policy pass, it settles on its
+	// own and stays outside the compensation chain already inserted — an
+	// accepted v1 limitation.
 	ApplyFailurePolicy(ctx context.Context) ([]WorkflowFailure, error)
 
-	// CompleteWorkflows settles workflows whose work is finished: a running
-	// workflow with every task succeeded becomes succeeded; a compensating
-	// workflow whose compensation tasks are all terminal becomes failed — or
-	// cancelled when the compensation was triggered through CancelWorkflow —
-	// and a compensating workflow with a dead compensation task becomes
-	// suspended for a manual decision. It returns the number of workflows
-	// transitioned.
+	// CompleteWorkflows settles workflows whose work is finished. A running
+	// workflow settles once all of its tasks are terminal (succeeded or dead):
+	// it becomes succeeded when none died, or failed — with FailureReason
+	// listing the dead task keys — when at least one task died but was tolerated
+	// (every dependent of each dead task declared IgnoreDeadDeps, so the policy
+	// never fired and the tolerant branches ran to completion). A compensating
+	// workflow settles once its compensation tasks are all terminal: it becomes
+	// failed — or cancelled when the compensation was triggered through
+	// CancelWorkflow — and a compensating workflow with a dead compensation task
+	// becomes suspended for a manual decision. It returns the number of
+	// workflows transitioned.
 	CompleteWorkflows(ctx context.Context) (int64, error)
 
 	// TaskResults returns the persisted results of the workflow's succeeded

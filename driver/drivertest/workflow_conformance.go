@@ -36,8 +36,13 @@ func RunWorkflowConformance(t *testing.T, newStore func(t *testing.T) driver.Sto
 	t.Run("Signal", func(t *testing.T) { runWorkflowSignal(t, store, ws) })
 	t.Run("FailurePolicyCancel", func(t *testing.T) { runWorkflowFailureCancel(t, store, ws) })
 	t.Run("FailurePolicySuspendAndRetry", func(t *testing.T) { runWorkflowSuspendRetry(t, store, ws) })
+	t.Run("FailurePolicyMixedIgnoreDeadDeps", func(t *testing.T) { runWorkflowMixedIgnoreDeadDeps(t, store, ws) })
+	t.Run("FailurePolicyFullyIgnoredCompletesFailed", func(t *testing.T) { runWorkflowFullyIgnoredDeadDeps(t, store, ws) })
+	t.Run("FailurePolicyDeadLeafTriggers", func(t *testing.T) { runWorkflowDeadLeafTriggers(t, store, ws) })
 	t.Run("CompleteWorkflows", func(t *testing.T) { runWorkflowComplete(t, store, ws) })
 	t.Run("CancelWorkflow", func(t *testing.T) { runWorkflowCancel(t, store, ws) })
+	t.Run("CompensateWorkflowManual", func(t *testing.T) { runWorkflowCompensateManual(t, store, ws) })
+	t.Run("RetryDuringCompensating", func(t *testing.T) { runWorkflowRetryDuringCompensating(t, store, ws) })
 	t.Run("TaskResults", func(t *testing.T) { runWorkflowTaskResults(t, store, ws) })
 	t.Run("AckTaskResultFencing", func(t *testing.T) { runWorkflowAckFencing(t, store, ws) })
 	t.Run("InternalKindsStayInternal", func(t *testing.T) { runWorkflowInternalKinds(t, store, ws) })
@@ -402,6 +407,105 @@ func runWorkflowSuspendRetry(t *testing.T, store driver.Store, ws driver.Workflo
 	is.True(driver.IsNotFound(ws.RetryWorkflow(ctx, uuid.New())), "retrying a missing workflow is not-found")
 }
 
+// ---- Failure policy: IgnoreDeadDeps exemption -----------------------------
+
+// runWorkflowMixedIgnoreDeadDeps pins that a dead task keeps triggering the
+// policy as long as one of its dependents does not tolerate dead deps: the
+// exemption requires every dependent to opt in.
+func runWorkflowMixedIgnoreDeadDeps(t *testing.T, store driver.Store, ws driver.WorkflowStore) {
+	t.Helper()
+	ctx := context.Background()
+	is := require.New(t)
+
+	dead := wfTask("dead", "wfc_mix_dead")
+	dead.MaxAttempts = 1
+	tol := wfTask("tol", "wfc_mix_tol")
+	tol.IgnoreDeadDeps = true
+	strict := wfTask("strict", "wfc_mix_strict") // does not tolerate dead deps
+	id := createWF(ctx, t, ws, driver.WorkflowParams{
+		Name: "wfc_mix", OnFailure: driver.OnFailureSuspend,
+		Tasks: []driver.WorkflowTask{dead, tol, strict},
+		Deps: []driver.WorkflowDep{
+			{TaskKey: "tol", DependsOnKey: "dead"},
+			{TaskKey: "strict", DependsOnKey: "dead"},
+		},
+	})
+
+	killWFTask(ctx, t, store, "wfc_mix_dead")
+
+	// One non-tolerant dependent is enough to trigger the policy.
+	failure := applyPolicyFor(ctx, t, ws, id)
+	is.Equal(driver.OnFailureSuspend, failure.Policy)
+	is.Equal([]string{"dead"}, failure.DeadTasks)
+	w := wfView(ctx, t, ws, id)
+	is.Equal(driver.WorkflowSuspended, w.State)
+	is.Contains(w.FailureReason, "dead")
+}
+
+// runWorkflowFullyIgnoredDeadDeps pins that a dead task every dependent
+// tolerates does not trigger the policy — the tolerant branch runs to
+// completion — yet the finished workflow settles failed, not succeeded.
+func runWorkflowFullyIgnoredDeadDeps(t *testing.T, store driver.Store, ws driver.WorkflowStore) {
+	t.Helper()
+	ctx := context.Background()
+	is := require.New(t)
+
+	dead := wfTask("dead", "wfc_all_dead")
+	dead.MaxAttempts = 1
+	tol := wfTask("tol", "wfc_all_tol")
+	tol.IgnoreDeadDeps = true
+	id := createWF(ctx, t, ws, driver.WorkflowParams{
+		Name: "wfc_all", OnFailure: driver.OnFailureCancel,
+		Tasks: []driver.WorkflowTask{dead, tol},
+		Deps:  []driver.WorkflowDep{{TaskKey: "tol", DependsOnKey: "dead"}},
+	})
+
+	killWFTask(ctx, t, store, "wfc_all_dead")
+
+	// Every dependent tolerates the death, so the policy leaves it running.
+	failures, err := ws.ApplyFailurePolicy(ctx)
+	is.NoError(err)
+	for _, fl := range failures {
+		is.NotEqual(id, fl.WorkflowID, "a fully-tolerated dead task must not trigger the policy")
+	}
+	is.Equal(driver.WorkflowRunning, wfView(ctx, t, ws, id).State)
+
+	// The tolerant branch runs to completion.
+	promoteUnblocked(ctx, t, ws)
+	is.Equal(driver.StatePending, wfTaskByKey(ctx, t, ws, id, "tol").State, "the tolerant dependent is promoted")
+	finishWFTask(ctx, t, store, ws, "wfc_all_tol", nil)
+
+	// Every task is terminal with one dead: the workflow settles failed.
+	completeWorkflows(ctx, t, ws)
+	w := wfView(ctx, t, ws, id)
+	is.Equal(driver.WorkflowFailed, w.State, "a completed workflow with a tolerated dead task is failed, not succeeded")
+	is.Contains(w.FailureReason, "dead", "the dead task key is recorded")
+	is.False(w.CompletedAt.IsZero())
+}
+
+// runWorkflowDeadLeafTriggers pins that the exemption is never vacuous: a dead
+// leaf (no dependents) always triggers the policy.
+func runWorkflowDeadLeafTriggers(t *testing.T, store driver.Store, ws driver.WorkflowStore) {
+	t.Helper()
+	ctx := context.Background()
+	is := require.New(t)
+
+	leaf := wfTask("leaf", "wfc_leaf_dead")
+	leaf.MaxAttempts = 1
+	id := createWF(ctx, t, ws, driver.WorkflowParams{
+		Name: "wfc_leaf", OnFailure: driver.OnFailureSuspend,
+		Tasks: []driver.WorkflowTask{leaf, wfTask("other", "wfc_leaf_other")},
+	})
+
+	killWFTask(ctx, t, store, "wfc_leaf_dead")
+
+	// No dependent means no tolerant branch to preserve: the leaf triggers.
+	failure := applyPolicyFor(ctx, t, ws, id)
+	is.Equal(driver.OnFailureSuspend, failure.Policy)
+	is.Equal([]string{"leaf"}, failure.DeadTasks)
+	is.Equal(driver.WorkflowSuspended, wfView(ctx, t, ws, id).State)
+}
+
 // ---- CompleteWorkflows ----------------------------------------------------
 
 func runWorkflowComplete(t *testing.T, store driver.Store, ws driver.WorkflowStore) {
@@ -452,6 +556,101 @@ func runWorkflowCancel(t *testing.T, _ driver.Store, ws driver.WorkflowStore) {
 
 	is.True(driver.IsNotFound(ws.CancelWorkflow(ctx, id)), "a terminal workflow cannot be cancelled again")
 	is.True(driver.IsNotFound(ws.CancelWorkflow(ctx, uuid.New())))
+}
+
+// ---- CompensateWorkflow (manual, from suspended) --------------------------
+
+// runWorkflowCompensateManual pins a manual CompensateWorkflow on a suspended
+// workflow: the succeeded task's compensation runs and the workflow settles
+// failed.
+func runWorkflowCompensateManual(t *testing.T, store driver.Store, ws driver.WorkflowStore) {
+	t.Helper()
+	ctx := context.Background()
+	is := require.New(t)
+
+	a := wfTask("a", "wfc_cmp_a")
+	a.CompensationKind = "wfc_cmp_undo_a"
+	a.CompensationPayload = json.RawMessage(`{"undo":"a"}`)
+	b := wfTask("b", "wfc_cmp_b")
+	b.MaxAttempts = 1
+	id := createWF(ctx, t, ws, driver.WorkflowParams{
+		Name: "wfc_cmp", OnFailure: driver.OnFailureSuspend,
+		Tasks: []driver.WorkflowTask{a, b},
+	})
+
+	// a succeeds (compensable), b dies: the suspend policy parks the workflow.
+	finishWFTask(ctx, t, store, ws, "wfc_cmp_a", nil)
+	killWFTask(ctx, t, store, "wfc_cmp_b")
+	failure := applyPolicyFor(ctx, t, ws, id)
+	is.Equal(driver.OnFailureSuspend, failure.Policy)
+	is.Equal(driver.WorkflowSuspended, wfView(ctx, t, ws, id).State)
+
+	// An operator compensates manually: the succeeded task's compensation is
+	// inserted and the workflow moves to compensating.
+	is.NoError(ws.CompensateWorkflow(ctx, id))
+	is.Equal(driver.WorkflowCompensating, wfView(ctx, t, ws, id).State)
+	compA := wfTaskByKey(ctx, t, ws, id, "comp:a")
+	is.Equal(driver.StatePending, compA.State)
+	is.Equal("wfc_cmp_undo_a", compA.Kind)
+	is.JSONEq(`{"undo":"a"}`, string(compA.Payload), "the compensation carries its declared payload")
+
+	finishWFTask(ctx, t, store, ws, "wfc_cmp_undo_a", nil)
+	completeWorkflows(ctx, t, ws)
+	is.Equal(driver.WorkflowFailed, wfView(ctx, t, ws, id).State)
+
+	is.True(driver.IsNotFound(ws.CompensateWorkflow(ctx, id)), "a terminal workflow cannot be compensated")
+	is.True(driver.IsNotFound(ws.CompensateWorkflow(ctx, uuid.New())))
+}
+
+// ---- RetryWorkflow during compensating ------------------------------------
+
+// runWorkflowRetryDuringCompensating pins a retry issued while the workflow is
+// still compensating: only the dead compensation tasks reset, the workflow
+// stays compensating, and the original dead task is never resurrected.
+func runWorkflowRetryDuringCompensating(t *testing.T, store driver.Store, ws driver.WorkflowStore) {
+	t.Helper()
+	ctx := context.Background()
+	is := require.New(t)
+
+	a := wfTask("a", "wfc_rtc_a")
+	a.CompensationKind = "wfc_rtc_undo_a"
+	b := wfTask("b", "wfc_rtc_b")
+	b.CompensationKind = "wfc_rtc_undo_b"
+	c := wfTask("c", "wfc_rtc_c")
+	c.MaxAttempts = 1
+	id := createWF(ctx, t, ws, driver.WorkflowParams{
+		Name: "wfc_rtc", OnFailure: driver.OnFailureCancel,
+		Tasks: []driver.WorkflowTask{a, b, c, wfTask("d", "wfc_rtc_d")},
+		Deps:  []driver.WorkflowDep{{TaskKey: "d", DependsOnKey: "c"}},
+	})
+
+	// a then b succeed (so comp:b runs first), c dies: the cancel policy inserts
+	// the chain comp:b (pending) → comp:a (blocked) and moves to compensating.
+	finishWFTask(ctx, t, store, ws, "wfc_rtc_a", nil)
+	time.Sleep(tick)
+	finishWFTask(ctx, t, store, ws, "wfc_rtc_b", nil)
+	killWFTask(ctx, t, store, "wfc_rtc_c")
+	failure := applyPolicyFor(ctx, t, ws, id)
+	is.Equal(driver.OnFailureCancel, failure.Policy)
+	is.Equal(driver.WorkflowCompensating, wfView(ctx, t, ws, id).State)
+
+	// The first compensation dies. We retry WITHOUT settling, so the workflow is
+	// still compensating when RetryWorkflow runs.
+	killWFTask(ctx, t, store, "wfc_rtc_undo_b")
+	is.Equal(driver.WorkflowCompensating, wfView(ctx, t, ws, id).State)
+
+	is.NoError(ws.RetryWorkflow(ctx, id))
+	is.Equal(driver.WorkflowCompensating, wfView(ctx, t, ws, id).State, "retry keeps a compensating workflow compensating")
+	is.Equal(driver.StatePending, wfTaskByKey(ctx, t, ws, id, "comp:b").State, "only the dead compensation is reset to pending")
+	is.Equal(driver.StateBlocked, wfTaskByKey(ctx, t, ws, id, "comp:a").State, "the blocked compensation stays blocked")
+	is.Equal(driver.StateDead, wfTaskByKey(ctx, t, ws, id, "c").State, "the original dead task is never resurrected")
+
+	// The retried chain finishes and the workflow settles failed.
+	finishWFTask(ctx, t, store, ws, "wfc_rtc_undo_b", nil)
+	promoteUnblocked(ctx, t, ws)
+	finishWFTask(ctx, t, store, ws, "wfc_rtc_undo_a", nil)
+	completeWorkflows(ctx, t, ws)
+	is.Equal(driver.WorkflowFailed, wfView(ctx, t, ws, id).State)
 }
 
 // ---- TaskResults ----------------------------------------------------------

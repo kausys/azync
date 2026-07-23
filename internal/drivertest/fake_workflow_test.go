@@ -157,6 +157,31 @@ func TestWorkflowCreateDuplicateTaskKeyErrors(t *testing.T) {
 	is.Error(err, "task keys are unique per workflow")
 }
 
+func TestWorkflowCreateDuplicateIDErrors(t *testing.T) {
+	t.Parallel()
+	is := require.New(t)
+	f, _ := newWorkflowFake(t)
+	ctx := context.Background()
+
+	id := createWorkflow(t, f, driver.WorkflowParams{
+		Name:  "wf-dupid",
+		Tasks: []driver.WorkflowTask{task("a", "dupid_a")},
+	})
+
+	// Reusing the primary key is a hard error (SQL PK fidelity), never a silent
+	// overwrite of the live workflow.
+	inserted, _, err := f.CreateWorkflow(ctx, driver.WorkflowParams{
+		ID:    id,
+		Name:  "wf-dupid-other",
+		Tasks: []driver.WorkflowTask{task("a", "dupid_b")},
+	})
+	is.Error(err, "a duplicate workflow id is rejected")
+	is.False(inserted)
+	is.Contains(err.Error(), id.String())
+	// The original workflow is untouched.
+	is.Equal("wf-dupid", getWorkflow(t, f, id).Name)
+}
+
 func TestWorkflowCreateDedupeLiveOnly(t *testing.T) {
 	t.Parallel()
 	is := require.New(t)
@@ -533,6 +558,69 @@ func TestWorkflowFailurePolicySkipsDeadTaskIgnoredByAllDependents(t *testing.T) 
 	n, err := f.PromoteUnblocked(ctx)
 	is.NoError(err)
 	is.Equal(int64(1), n, "the ignoring dependent still runs")
+}
+
+func TestWorkflowFailurePolicyDeadLeafTriggers(t *testing.T) {
+	t.Parallel()
+	is := require.New(t)
+	f, _ := newWorkflowFake(t)
+	ctx := context.Background()
+
+	// leaf has no dependents, so the IgnoreDeadDeps exemption is vacuously
+	// unavailable: a dead leaf always triggers the policy.
+	leaf := task("leaf", "fpl_leaf")
+	leaf.MaxAttempts = 1
+	id := createWorkflow(t, f, driver.WorkflowParams{
+		Name: "wf-fpl", OnFailure: driver.OnFailureSuspend,
+		Tasks: []driver.WorkflowTask{leaf, task("other", "fpl_other")},
+	})
+
+	killKind(t, f, "fpl_leaf")
+	failures, err := f.ApplyFailurePolicy(ctx)
+	is.NoError(err)
+	is.Len(failures, 1, "a dead leaf with no dependents triggers the policy")
+	is.Equal([]string{"leaf"}, failures[0].DeadTasks)
+	is.Equal(driver.WorkflowSuspended, getWorkflow(t, f, id).State)
+}
+
+func TestWorkflowRunningCompletesFailedWhenToleratedTaskDied(t *testing.T) {
+	t.Parallel()
+	is := require.New(t)
+	f, _ := newWorkflowFake(t)
+	ctx := context.Background()
+
+	a := task("a", "wct_a")
+	a.MaxAttempts = 1
+	b := task("b", "wct_b")
+	b.IgnoreDeadDeps = true
+	id := createWorkflow(t, f, driver.WorkflowParams{
+		Name: "wf-wct", OnFailure: driver.OnFailureCancel,
+		Tasks: []driver.WorkflowTask{a, b},
+		Deps:  []driver.WorkflowDep{{TaskKey: "b", DependsOnKey: "a"}},
+	})
+
+	// a dies but its only dependent tolerates it, so the policy never fires.
+	killKind(t, f, "wct_a")
+	failures, err := f.ApplyFailurePolicy(ctx)
+	is.NoError(err)
+	is.Empty(failures, "a fully-tolerated dead task does not trigger the policy")
+	is.Equal(driver.WorkflowRunning, getWorkflow(t, f, id).State)
+
+	// The tolerant branch runs to completion.
+	n, err := f.PromoteUnblocked(ctx)
+	is.NoError(err)
+	is.Equal(int64(1), n)
+	finishKind(t, f, "wct_b", nil)
+
+	// Every task is now terminal with one dead: the workflow settles failed,
+	// not succeeded, recording the dead task key.
+	n, err = f.CompleteWorkflows(ctx)
+	is.NoError(err)
+	is.Equal(int64(1), n)
+	w := getWorkflow(t, f, id)
+	is.Equal(driver.WorkflowFailed, w.State, "a completed workflow with a dead task is failed")
+	is.Contains(w.FailureReason, "a", "the dead task key is recorded")
+	is.False(w.CompletedAt.IsZero())
 }
 
 // ---- completion -----------------------------------------------------------
