@@ -1,5 +1,17 @@
 # Changelog
 
+## [0.0.2](https://github.com/kausys/azync/compare/v0.0.2...v0.0.2) (2026-07-23)
+
+
+### ⚠ BREAKING CHANGES
+
+* event.Envelope, queue.Job[T], queue.RawJob and event.Worker.Subscribe are removed; event.Subscriber is now the identity interface and the durable record is event.Subscription.
+
+### Features
+
+* deliver pure domain values to handlers with context metadata ([d5390cf](https://github.com/kausys/azync/commit/d5390cfe317fdd751f9614b868d09a51d976761d))
+* initial release ([7dc21c0](https://github.com/kausys/azync/commit/7dc21c0d536b1a3049b94fd11cad660cecef3d3d))
+
 ## 0.0.2 (2026-07-23)
 
 
