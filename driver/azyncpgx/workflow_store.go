@@ -405,9 +405,18 @@ func (s *Store) ApplyFailurePolicy(ctx context.Context) ([]driver.WorkflowFailur
 		reason := deadTasksReason(fw.deadKeys)
 
 		if fw.policy == driver.OnFailureSuspend {
-			if _, err := tx.Exec(ctx, `UPDATE azync_workflows SET state = 'suspended', failure_reason = $2, updated_at = now() WHERE id = $1`,
-				wid, reason); err != nil {
+			// The state re-check in the WHERE guards the same race the cancel
+			// branch resolves with lockWorkflowForUpdate: a concurrent manual
+			// CompensateWorkflow/CancelWorkflow that landed after this pass's
+			// unlocked read must not be overwritten with 'suspended'.
+			tag, err := tx.Exec(ctx,
+				`UPDATE azync_workflows SET state = 'suspended', failure_reason = $2, updated_at = now() WHERE id = $1 AND state = 'running'`,
+				wid, reason)
+			if err != nil {
 				return nil, fmt.Errorf("azyncpgx: suspend workflow: %w", err)
+			}
+			if tag.RowsAffected() == 0 {
+				continue // the workflow already left running; nothing to report
 			}
 		} else {
 			state, err := s.lockWorkflowForUpdate(ctx, tx, wid)
@@ -1023,6 +1032,12 @@ WHERE id = $1`
 // non-terminal tasks are cancelled and the workflow becomes cancelled, except a
 // compensating workflow, which keeps compensating until CompleteWorkflows lands
 // it on cancelled.
+//
+// Concurrency: the initial state read takes the row lock (FOR UPDATE), so a
+// cancel racing a scheduler pass (or another verb) that is settling the same
+// workflow blocks until the winner commits and then observes the committed
+// state — a workflow that just reached a terminal state is a not-found here,
+// never flipped to cancelled after the fact.
 func (s *Store) CancelWorkflow(ctx context.Context, id uuid.UUID) error {
 	tx, err := s.pool.Begin(ctx)
 	if err != nil {
@@ -1031,7 +1046,7 @@ func (s *Store) CancelWorkflow(ctx context.Context, id uuid.UUID) error {
 	defer func() { _ = tx.Rollback(ctx) }()
 
 	var state string
-	err = tx.QueryRow(ctx, `SELECT state FROM azync_workflows WHERE id = $1`, id).Scan(&state)
+	err = tx.QueryRow(ctx, `SELECT state FROM azync_workflows WHERE id = $1 FOR UPDATE`, id).Scan(&state)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return driver.NewNotFound("cancel workflow")
 	}
@@ -1078,10 +1093,15 @@ func (s *Store) VacuumWorkflows(ctx context.Context, retention time.Duration) (i
 
 // requireNonTerminalWorkflow loads a workflow for a manager verb, mapping a
 // missing or terminal workflow to not-found, and reports whether it carries a
-// compensation chain. Callers run inside a transaction.
+// compensation chain. The read takes the row lock (FOR UPDATE) so the caller
+// serializes against a concurrent policy pass or verb on the same workflow:
+// both answers are stale the instant a racing transaction commits, and acting
+// on them unlocked lets RetryWorkflow reset the original dead task after a
+// concurrent ApplyFailurePolicy started compensation. Callers run inside a
+// transaction; the lock releases on commit or rollback.
 func (s *Store) requireNonTerminalWorkflow(ctx context.Context, q querier, op string, id uuid.UUID) (bool, error) {
 	var state string
-	err := q.QueryRow(ctx, `SELECT state FROM azync_workflows WHERE id = $1`, id).Scan(&state)
+	err := q.QueryRow(ctx, `SELECT state FROM azync_workflows WHERE id = $1 FOR UPDATE`, id).Scan(&state)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return false, driver.NewNotFound(op)
 	}
