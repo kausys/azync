@@ -32,6 +32,9 @@ CREATE INDEX azync_workflows_name_created_idx ON azync_workflows (name, created_
 -- while a prior execution is still live; a terminal workflow frees the key.
 CREATE UNIQUE INDEX azync_workflows_idempotency_idx ON azync_workflows (name, idempotency_key)
     WHERE idempotency_key IS NOT NULL AND state IN ('running', 'suspended', 'compensating');
+-- VacuumWorkflows' retention sweep: terminal workflows by completion time.
+CREATE INDEX azync_workflows_terminal_completed_idx ON azync_workflows (completed_at)
+    WHERE state IN ('succeeded', 'failed', 'cancelled');
 
 -- azync_workflow_deps holds the static DAG edges plus the compensation chain
 -- links inserted at compensation time: task_key waits for depends_on_key.
@@ -69,6 +72,8 @@ CREATE INDEX azync_jobs_wf_blocked_idx ON azync_jobs (workflow_id) WHERE state =
 CREATE INDEX azync_jobs_wf_waiting_idx ON azync_jobs (workflow_id, signal_name) WHERE state = 'waiting';
 
 -- +goose Down
+-- Safe only on a schema with no workflow data: re-adding the narrowed CHECKs
+-- below fails while any workflow row exists (see README, "Migrations").
 DROP INDEX azync_jobs_wf_waiting_idx;
 DROP INDEX azync_jobs_wf_blocked_idx;
 DROP INDEX azync_jobs_workflow_task_idx;
@@ -79,6 +84,8 @@ ALTER TABLE azync_jobs ADD CONSTRAINT azync_jobs_state_check
 
 ALTER TABLE azync_jobs DROP CONSTRAINT azync_jobs_source_check;
 ALTER TABLE azync_jobs ADD CONSTRAINT azync_jobs_source_check CHECK (source IN ('queue', 'event'));
+
+DROP INDEX azync_workflows_terminal_completed_idx;
 
 ALTER TABLE azync_jobs
     DROP COLUMN ignore_dead_deps,
