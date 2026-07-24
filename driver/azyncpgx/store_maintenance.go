@@ -152,9 +152,13 @@ func (s *Store) VacuumIdempotency(ctx context.Context, source driver.Source) (in
 	return tag.RowsAffected(), nil
 }
 
+// vacuumCompletedSQL exempts workflow-owned jobs (workflow_id IS NOT NULL): a
+// succeeded task can sit for as long as the workflow keeps running behind it, so
+// its lifecycle belongs to the workflow — only VacuumWorkflows' terminal-workflow
+// cascade removes it. A plain queue/event job of the same age is unaffected.
 const vacuumCompletedSQL = `
 DELETE FROM azync_jobs
-WHERE source = $1 AND state = 'succeeded' AND completed_at < now() - make_interval(secs => $2)`
+WHERE source = $1 AND state = 'succeeded' AND workflow_id IS NULL AND completed_at < now() - make_interval(secs => $2)`
 
 // VacuumCompleted trims succeeded jobs of the source completed before retention
 // ago. A retention <= 0 removes nothing.

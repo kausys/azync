@@ -408,7 +408,9 @@ func jobColumns(alias string) string {
 		a + `max_attempts, ` + a + `reap_count, ` + a + `payload::text, ` + a + `meta::text, ` +
 		`COALESCE(` + a + `trace_id, ''), COALESCE(` + a + `span_id, ''), COALESCE(` + a + `trace_flags, 0), ` +
 		a + `run_at, ` + a + `lease_until, ` + a + `lease_token, COALESCE(` + a + `last_error, ''), ` +
-		a + `event_id, ` + a + `replay, ` + a + `enqueued_at, ` + a + `failed_at, ` + a + `completed_at`
+		a + `event_id, ` + a + `replay, ` + a + `enqueued_at, ` + a + `failed_at, ` + a + `completed_at, ` +
+		a + `workflow_id, COALESCE(` + a + `task_key, ''), ` + a + `result::text, ` +
+		`COALESCE(` + a + `signal_name, ''), COALESCE(` + a + `compensation_kind, ''), ` + a + `ignore_dead_deps`
 }
 
 // eventColumns is the projected ledger column list under the given alias, used
@@ -444,6 +446,13 @@ type scannedJob struct {
 	enqueuedAt  time.Time
 	failedAt    pgtype.Timestamptz
 	completedAt pgtype.Timestamptz
+	// Workflow-task columns. NULL/false for every source but SourceWorkflow.
+	workflowID       pgtype.UUID
+	taskKey          string
+	result           *string
+	signalName       string
+	compensationKind string
+	ignoreDeadDeps   bool
 }
 
 // scannedEvent is the raw scan target for eventColumns.
@@ -466,6 +475,7 @@ func (sj *scannedJob) scanArgs() []any {
 		&sj.id, &sj.source, &sj.kind, &sj.state, &sj.attempt, &sj.maxAttempts, &sj.reapCount,
 		&sj.payload, &sj.meta, &sj.traceID, &sj.spanID, &sj.traceFlags, &sj.runAt, &sj.leaseUntil,
 		&sj.leaseToken, &sj.lastError, &sj.eventID, &sj.replay, &sj.enqueuedAt, &sj.failedAt, &sj.completedAt,
+		&sj.workflowID, &sj.taskKey, &sj.result, &sj.signalName, &sj.compensationKind, &sj.ignoreDeadDeps,
 	}
 }
 
@@ -493,28 +503,38 @@ func (sj *scannedJob) toJob() (driver.Job, error) {
 	if sj.payload != nil {
 		payload = json.RawMessage(*sj.payload)
 	}
+	var result json.RawMessage
+	if sj.result != nil {
+		result = json.RawMessage(*sj.result)
+	}
 	return driver.Job{
-		ID:          toUUID(sj.id),
-		Source:      driver.Source(sj.source),
-		Kind:        sj.kind,
-		State:       driver.JobState(sj.state),
-		Attempt:     sj.attempt,
-		MaxAttempts: sj.maxAttempts,
-		ReapCount:   sj.reapCount,
-		Payload:     payload,
-		Meta:        meta,
-		TraceID:     sj.traceID,
-		SpanID:      sj.spanID,
-		TraceFlags:  sj.traceFlags,
-		RunAt:       sj.runAt,
-		LeaseUntil:  sj.leaseUntil.Time,
-		LeaseToken:  toUUID(sj.leaseToken),
-		LastError:   sj.lastError,
-		EventID:     toUUID(sj.eventID),
-		Replay:      sj.replay,
-		EnqueuedAt:  sj.enqueuedAt,
-		FailedAt:    sj.failedAt.Time,
-		CompletedAt: sj.completedAt.Time,
+		ID:               toUUID(sj.id),
+		Source:           driver.Source(sj.source),
+		Kind:             sj.kind,
+		State:            driver.JobState(sj.state),
+		Attempt:          sj.attempt,
+		MaxAttempts:      sj.maxAttempts,
+		ReapCount:        sj.reapCount,
+		Payload:          payload,
+		Meta:             meta,
+		TraceID:          sj.traceID,
+		SpanID:           sj.spanID,
+		TraceFlags:       sj.traceFlags,
+		RunAt:            sj.runAt,
+		LeaseUntil:       sj.leaseUntil.Time,
+		LeaseToken:       toUUID(sj.leaseToken),
+		LastError:        sj.lastError,
+		EventID:          toUUID(sj.eventID),
+		Replay:           sj.replay,
+		EnqueuedAt:       sj.enqueuedAt,
+		FailedAt:         sj.failedAt.Time,
+		CompletedAt:      sj.completedAt.Time,
+		WorkflowID:       toUUID(sj.workflowID),
+		TaskKey:          sj.taskKey,
+		Result:           result,
+		SignalName:       sj.signalName,
+		CompensationKind: sj.compensationKind,
+		IgnoreDeadDeps:   sj.ignoreDeadDeps,
 	}, nil
 }
 

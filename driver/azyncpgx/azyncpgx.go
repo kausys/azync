@@ -200,11 +200,13 @@ type querier interface {
 // Interface assertions: the driver implements the mandatory Store plus every
 // optional capability, and TxStore over pgx.Tx (one tx type per driver).
 var (
-	_ driver.Store           = (*Store)(nil)
-	_ driver.Notifier        = (*Store)(nil)
-	_ driver.LeaderElector   = (*Store)(nil)
-	_ driver.Migrator        = (*Store)(nil)
-	_ driver.TxStore[pgx.Tx] = (*Store)(nil)
-	_ querier                = (*pgxpool.Pool)(nil)
-	_ querier                = (pgx.Tx)(nil)
+	_ driver.Store                   = (*Store)(nil)
+	_ driver.Notifier                = (*Store)(nil)
+	_ driver.LeaderElector           = (*Store)(nil)
+	_ driver.Migrator                = (*Store)(nil)
+	_ driver.TxStore[pgx.Tx]         = (*Store)(nil)
+	_ driver.WorkflowStore           = (*Store)(nil)
+	_ driver.TxWorkflowStore[pgx.Tx] = (*Store)(nil)
+	_ querier                        = (*pgxpool.Pool)(nil)
+	_ querier                        = (pgx.Tx)(nil)
 )
