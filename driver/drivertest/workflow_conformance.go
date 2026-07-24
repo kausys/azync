@@ -40,6 +40,7 @@ func RunWorkflowConformance(t *testing.T, newStore func(t *testing.T) driver.Sto
 	t.Run("FailurePolicyFullyIgnoredCompletesFailed", func(t *testing.T) { runWorkflowFullyIgnoredDeadDeps(t, store, ws) })
 	t.Run("FailurePolicyDeadLeafTriggers", func(t *testing.T) { runWorkflowDeadLeafTriggers(t, store, ws) })
 	t.Run("CompleteWorkflows", func(t *testing.T) { runWorkflowComplete(t, store, ws) })
+	t.Run("CompleteWorkflowsDefersNonToleratedDead", func(t *testing.T) { runWorkflowCompleteDefersNonToleratedDead(t, store, ws) })
 	t.Run("CancelWorkflow", func(t *testing.T) { runWorkflowCancel(t, store, ws) })
 	t.Run("CompensateWorkflowManual", func(t *testing.T) { runWorkflowCompensateManual(t, store, ws) })
 	t.Run("RetryDuringCompensating", func(t *testing.T) { runWorkflowRetryDuringCompensating(t, store, ws) })
@@ -527,6 +528,61 @@ func runWorkflowComplete(t *testing.T, store driver.Store, ws driver.WorkflowSto
 	completeWorkflows(ctx, t, ws)
 	w := wfView(ctx, t, ws, id)
 	is.Equal(driver.WorkflowSucceeded, w.State)
+	is.False(w.CompletedAt.IsZero())
+}
+
+// runWorkflowCompleteDefersNonToleratedDead pins the tolerance re-check in the
+// running-completion branch: when a workflow is all-terminal but carries a
+// NON-tolerated dead task (here a dead leaf) and its OnFailure policy has not
+// yet run, CompleteWorkflows must leave it running — not settle it failed and
+// skip the compensations. It reproduces the race where a task dies in the window
+// between the separate ApplyFailurePolicy and CompleteWorkflows transactions by
+// driving completion BEFORE the policy pass. ApplyFailurePolicy then applies the
+// cancel policy, inserting the compensation the premature settle would have
+// dropped.
+func runWorkflowCompleteDefersNonToleratedDead(t *testing.T, store driver.Store, ws driver.WorkflowStore) {
+	t.Helper()
+	ctx := context.Background()
+	is := require.New(t)
+
+	a := wfTask("a", "wfc_defer_a")
+	a.CompensationKind = "wfc_defer_undo_a"
+	a.CompensationPayload = json.RawMessage(`{"undo":"a"}`)
+	c := wfTask("c", "wfc_defer_c") // a dead leaf: no dependents, non-tolerated
+	c.MaxAttempts = 1
+	id := createWF(ctx, t, ws, driver.WorkflowParams{
+		Name: "wfc_defer", OnFailure: driver.OnFailureCancel,
+		Tasks: []driver.WorkflowTask{a, c},
+	})
+
+	// a succeeds (compensable) and the leaf c dies: every task is terminal, but
+	// c is a non-tolerated dead leaf whose policy has not run.
+	finishWFTask(ctx, t, store, ws, "wfc_defer_a", nil)
+	killWFTask(ctx, t, store, "wfc_defer_c")
+
+	// The death landed in the race window (completion runs before the policy).
+	// CompleteWorkflows must NOT settle the workflow failed — doing so would skip
+	// the cancel compensations.
+	completeWorkflows(ctx, t, ws)
+	is.Equal(driver.WorkflowRunning, wfView(ctx, t, ws, id).State,
+		"an all-terminal workflow with a non-tolerated dead task is left running for the policy")
+
+	// ApplyFailurePolicy now runs the cancel policy: it inserts the succeeded
+	// task's compensation and moves the workflow to compensating.
+	failure := applyPolicyFor(ctx, t, ws, id)
+	is.Equal(driver.OnFailureCancel, failure.Policy)
+	is.Equal([]string{"c"}, failure.DeadTasks)
+	is.Equal(driver.WorkflowCompensating, wfView(ctx, t, ws, id).State)
+	compA := wfTaskByKey(ctx, t, ws, id, "comp:a")
+	is.Equal(driver.StatePending, compA.State, "the policy inserts the compensation a premature settle would have skipped")
+	is.Equal("wfc_defer_undo_a", compA.Kind)
+
+	// The chain runs and the workflow settles failed — now with compensation.
+	finishWFTask(ctx, t, store, ws, "wfc_defer_undo_a", nil)
+	completeWorkflows(ctx, t, ws)
+	w := wfView(ctx, t, ws, id)
+	is.Equal(driver.WorkflowFailed, w.State)
+	is.Contains(w.FailureReason, "c", "the dead task is recorded")
 	is.False(w.CompletedAt.IsZero())
 }
 

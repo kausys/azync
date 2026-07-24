@@ -251,16 +251,28 @@ type WorkflowStore interface {
 	ApplyFailurePolicy(ctx context.Context) ([]WorkflowFailure, error)
 
 	// CompleteWorkflows settles workflows whose work is finished. A running
-	// workflow settles once all of its tasks are terminal (succeeded or dead):
-	// it becomes succeeded when none died, or failed — with FailureReason
-	// listing the dead task keys — when at least one task died but was tolerated
-	// (every dependent of each dead task declared IgnoreDeadDeps, so the policy
-	// never fired and the tolerant branches ran to completion). A compensating
-	// workflow settles once its compensation tasks are all terminal: it becomes
-	// failed — or cancelled when the compensation was triggered through
-	// CancelWorkflow — and a compensating workflow with a dead compensation task
-	// becomes suspended for a manual decision. It returns the number of
-	// workflows transitioned.
+	// workflow settles once all of its tasks are terminal (succeeded or dead)
+	// AND every dead task is tolerated — each has at least one dependent and all
+	// of its dependents declare IgnoreDeadDeps: it becomes succeeded when none
+	// died, or failed — with FailureReason listing the dead task keys — when at
+	// least one task died but every death was tolerated (the policy never fired
+	// and the tolerant branches ran to completion). A running workflow that is
+	// all-terminal but carries a NON-tolerated dead task (a dead leaf, or a dead
+	// task some dependent does not tolerate) is left running for
+	// ApplyFailurePolicy to run its OnFailure policy — cancel inserts the
+	// compensation chain, suspend parks it. This tolerance re-check is
+	// authoritative: correctness does NOT depend on ApplyFailurePolicy having run
+	// earlier in the same worker tick. The two are separate transactions, and a
+	// task can die in the window between them (a live worker acking an Abort), so
+	// relying on intra-tick ordering would let a Cancel-policy saga settle failed
+	// with its compensations silently skipped. Running ApplyFailurePolicy before
+	// CompleteWorkflows on each tick remains recommended hygiene — it settles a
+	// triggering death one tick sooner — but is no longer required for
+	// correctness. A compensating workflow settles once its compensation tasks
+	// are all terminal: it becomes failed — or cancelled when the compensation
+	// was triggered through CancelWorkflow — and a compensating workflow with a
+	// dead compensation task becomes suspended for a manual decision. It returns
+	// the number of workflows transitioned.
 	CompleteWorkflows(ctx context.Context) (int64, error)
 
 	// TaskResults returns the persisted results of the workflow's succeeded

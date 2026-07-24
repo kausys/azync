@@ -474,17 +474,36 @@ func (f *Fake) CompleteWorkflows(_ context.Context) (int64, error) {
 				continue
 			}
 			allTerminal := true
+			allTolerated := true
 			var deadKeys []string
 			for _, j := range tasks {
 				switch j.State {
 				case driver.StateSucceeded:
 				case driver.StateDead:
 					deadKeys = append(deadKeys, j.TaskKey)
+					// A dead task is tolerated iff it has at least one dependent
+					// and every dependent declares IgnoreDeadDeps — the same
+					// predicate ApplyFailurePolicy uses to decide it does not
+					// trigger the policy.
+					if !f.ignoredByAllDependentsLocked(w, j.TaskKey) {
+						allTolerated = false
+					}
 				default:
 					allTerminal = false
 				}
 			}
 			if !allTerminal {
+				continue
+			}
+			// A NON-tolerated dead task (a dead leaf, or a dead task some
+			// dependent does not tolerate) must be settled by ApplyFailurePolicy,
+			// which runs the OnFailure policy — cancel inserts the compensation
+			// chain. Settling here would skip it. The tolerance re-check makes
+			// this independent of whether ApplyFailurePolicy already ran this
+			// tick: a task can die in the window between the two separate
+			// transactions, so leave the workflow running for the policy pass
+			// (this tick or the next).
+			if !allTolerated {
 				continue
 			}
 			if len(deadKeys) > 0 {

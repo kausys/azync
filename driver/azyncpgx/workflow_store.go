@@ -586,10 +586,20 @@ WHERE w.state = 'running'
 	AND NOT EXISTS (SELECT 1 FROM azync_jobs j WHERE j.workflow_id = w.id AND j.source = 'workflow' AND j.state <> 'succeeded')`
 
 // completeRunningFailedSQL settles a running workflow whose tasks are all
-// terminal (succeeded or dead) with at least one dead — a tolerated death that
-// never triggered the policy — to failed, recording the sorted dead keys. By the
-// worker's tick order, triggering deaths already left 'running' in
-// ApplyFailurePolicy, so these are exactly the fully-tolerated ones.
+// terminal (succeeded or dead) with at least one dead — every dead task
+// tolerated, so the policy never triggered — to failed, recording the sorted
+// dead keys. The final NOT EXISTS re-checks tolerance directly instead of
+// trusting the worker's tick order: a dead task is tolerated iff it has at least
+// one dependent and every dependent declares ignore_dead_deps (the same
+// predicate as triggeringDeadTasksSQL, negated). If the workflow carries any
+// NON-tolerated dead task — a dead leaf (no dependents), or a dead task some
+// dependent does not tolerate — it is left running for ApplyFailurePolicy to run
+// its OnFailure policy (this tick or the next). This closes the race where a
+// task dies in the window between the separate ApplyFailurePolicy and
+// CompleteWorkflows transactions, which would otherwise settle a Cancel-policy
+// workflow failed with its compensations skipped. The succeeded branch
+// (completeRunningSucceededSQL) needs no such guard: it requires every task
+// succeeded, so no dead task can be present.
 const completeRunningFailedSQL = `
 UPDATE azync_workflows w SET state = 'failed', failure_reason = r.reason, completed_at = now(), updated_at = now()
 FROM (
@@ -601,6 +611,22 @@ FROM (
 			SELECT 1 FROM azync_jobs j2
 			WHERE j2.workflow_id = j.workflow_id AND j2.source = 'workflow'
 				AND j2.state <> 'succeeded' AND j2.state <> 'dead'
+		)
+		AND NOT EXISTS (
+			SELECT 1 FROM azync_jobs jd
+			WHERE jd.workflow_id = j.workflow_id AND jd.source = 'workflow' AND jd.state = 'dead'
+				AND (
+					NOT EXISTS (SELECT 1 FROM azync_workflow_deps d WHERE d.workflow_id = jd.workflow_id AND d.depends_on_key = jd.task_key)
+					OR EXISTS (
+						SELECT 1 FROM azync_workflow_deps d
+						WHERE d.workflow_id = jd.workflow_id AND d.depends_on_key = jd.task_key
+							AND NOT EXISTS (
+								SELECT 1 FROM azync_jobs dep
+								WHERE dep.workflow_id = d.workflow_id AND dep.task_key = d.task_key
+									AND dep.source = 'workflow' AND dep.ignore_dead_deps
+							)
+					)
+				)
 		)
 	GROUP BY j.workflow_id
 ) r
