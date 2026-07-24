@@ -267,8 +267,8 @@ type WorkflowStore interface {
 	// relying on intra-tick ordering would let a Cancel-policy saga settle failed
 	// with its compensations silently skipped. Running ApplyFailurePolicy before
 	// CompleteWorkflows on each tick remains recommended hygiene — it settles a
-	// triggering death one tick sooner — but is no longer required for
-	// correctness. A compensating workflow settles once its compensation tasks
+	// triggering death one tick sooner — but is not required for correctness. A
+	// compensating workflow settles once its compensation tasks
 	// are all terminal: it becomes failed — or cancelled when the compensation
 	// was triggered through CancelWorkflow — and a compensating workflow with a
 	// dead compensation task becomes suspended for a manual decision. It returns
@@ -296,7 +296,10 @@ type WorkflowStore interface {
 	ListWorkflows(ctx context.Context, filter WorkflowFilter, offset, limit int) ([]WorkflowView, int64, error)
 
 	// WorkflowTasks returns every task job of the workflow (compensation tasks
-	// included) in creation order, or a not-found error when the workflow does
+	// included) ordered by creation time — tasks created later (a compensation
+	// chain) follow tasks created earlier, but the relative order of tasks
+	// inserted in the same atomic batch (the initial DAG) is stable, not the
+	// declaration order. It returns a not-found error when the workflow does
 	// not exist.
 	WorkflowTasks(ctx context.Context, id uuid.UUID) ([]Job, error)
 

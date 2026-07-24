@@ -151,9 +151,13 @@ func runWorkflowCreate(t *testing.T, _ driver.Store, ws driver.WorkflowStore) {
 			wfTask("a", "wfc_create_a"),
 			wfTask("b", "wfc_create_b"),
 			{Key: "s", Kind: driver.KindSleep, SleepFor: time.Hour},
+			{Key: "s2", Kind: driver.KindSleep, SleepFor: time.Hour},
 			{Key: "g", Kind: driver.KindSignal, SignalName: "go"},
 		},
-		Deps: []driver.WorkflowDep{{TaskKey: "b", DependsOnKey: "a"}},
+		Deps: []driver.WorkflowDep{
+			{TaskKey: "b", DependsOnKey: "a"},
+			{TaskKey: "s2", DependsOnKey: "a"},
+		},
 	})
 
 	is.Equal(driver.StatePending, wfTaskByKey(ctx, t, ws, id, "a").State, "a dependency-free task is pending")
@@ -161,6 +165,10 @@ func runWorkflowCreate(t *testing.T, _ driver.Store, ws driver.WorkflowStore) {
 	s := wfTaskByKey(ctx, t, ws, id, "s")
 	is.Equal(driver.StateScheduled, s.State, "a root $sleep is scheduled")
 	is.True(s.RunAt.After(time.Now().Add(30*time.Minute)), "the sleep timer reflects SleepFor on the backend clock")
+	s2 := wfTaskByKey(ctx, t, ws, id, "s2")
+	is.Equal(driver.StateBlocked, s2.State, "a $sleep with deps is blocked")
+	is.True(s2.RunAt.Before(time.Now().Add(30*time.Minute)),
+		"a blocked $sleep's timer has not started: run_at is resolved at promotion, not creation")
 	is.Equal(driver.StateWaiting, wfTaskByKey(ctx, t, ws, id, "g").State, "a root $signal waits")
 
 	w := wfView(ctx, t, ws, id)
@@ -202,6 +210,8 @@ func runWorkflowDedupe(t *testing.T, store driver.Store, ws driver.WorkflowStore
 		}
 	}
 	first := createWF(ctx, t, ws, params())
+	is.Equal(driver.OnFailureCancel, wfView(ctx, t, ws, first).OnFailure,
+		"an empty OnFailure normalizes to the cancel default")
 
 	inserted, existing, err := ws.CreateWorkflow(ctx, params())
 	is.NoError(err)

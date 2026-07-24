@@ -84,12 +84,19 @@ func (f *Fake) CreateWorkflow(_ context.Context, p driver.WorkflowParams) (bool,
 		seen[tk.Key] = true
 	}
 
+	// An empty policy normalizes to the cancel default at creation, so views
+	// and the policy pass agree with the SQL driver's CASE on insert.
+	onFailure := p.OnFailure
+	if onFailure == "" {
+		onFailure = driver.OnFailureCancel
+	}
+
 	w := &fakeWorkflow{
 		WorkflowView: driver.WorkflowView{
 			ID:             p.ID,
 			Name:           p.Name,
 			State:          driver.WorkflowRunning,
-			OnFailure:      p.OnFailure,
+			OnFailure:      onFailure,
 			IdempotencyKey: p.IdempotencyKey,
 			Meta:           cloneMeta(p.Meta),
 			TraceID:        p.TraceID,
@@ -316,10 +323,7 @@ func (f *Fake) ApplyFailurePolicy(_ context.Context) ([]driver.WorkflowFailure, 
 		}
 		w.FailureReason = "dead tasks: " + strings.Join(deadKeys, ", ")
 		w.UpdatedAt = now
-		policy := w.OnFailure
-		if policy == "" {
-			policy = driver.OnFailureCancel
-		}
+		policy := w.OnFailure // normalized to cancel at creation when empty
 		if policy == driver.OnFailureSuspend {
 			w.State = driver.WorkflowSuspended
 		} else {

@@ -1290,7 +1290,7 @@ func addDepth(d *driver.Depths, state driver.JobState) {
 		d.Succeeded++
 	default:
 		// The workflow-only states (blocked, waiting, cancelled) have no
-		// Depths counter; the contract's Depths struct predates them.
+		// Depths counter.
 	}
 }
 

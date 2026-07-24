@@ -20,8 +20,7 @@ import (
 // The workflow capability of the pgx Store: the SQL implementation of
 // driver.WorkflowStore and driver.TxWorkflowStore[pgx.Tx]. It operates the
 // azync_workflows header table, the azync_workflow_deps edge table and the
-// source='workflow' rows of azync_jobs, honoring the same scheduler semantics as
-// the in-memory fake oracle (internal/drivertest/fake_workflow.go).
+// source='workflow' rows of azync_jobs.
 //
 // $sleep timer encoding: a KindSleep task carries its SleepFor duration in its
 // job payload as {"sleepSeconds": <float>}. CreateWorkflow writes it there
@@ -129,20 +128,24 @@ func (s *Store) createWorkflow(ctx context.Context, q querier, p driver.Workflow
 		state := initialTaskState(tk.Kind, hasDeps[tk.Key])
 
 		// The $sleep timer carries its duration in the payload; every other task
-		// keeps its opaque handler payload.
-		var sleepSecs float64
+		// keeps its opaque handler payload. Only a root timer (born scheduled)
+		// starts at creation — a blocked one keeps run_at = now() and
+		// PromoteUnblocked resolves its timer when the task is released.
+		var runAtOffsetSecs float64
 		payload := nullableRawJSON(tk.Payload)
 		if tk.Kind == driver.KindSleep {
-			sleepSecs = tk.SleepFor.Seconds()
-			enc, err := json.Marshal(sleepPayload{SleepSeconds: sleepSecs})
+			enc, err := json.Marshal(sleepPayload{SleepSeconds: tk.SleepFor.Seconds()})
 			if err != nil {
 				return false, uuid.Nil, fmt.Errorf("azyncpgx: marshal sleep payload: %w", err)
 			}
 			payload = string(enc)
+			if state == string(driver.StateScheduled) {
+				runAtOffsetSecs = tk.SleepFor.Seconds()
+			}
 		}
 
 		if _, err := q.Exec(ctx, insertWorkflowTaskSQL,
-			uuid.New(), tk.Kind, state, sleepSecs, tk.MaxAttempts, tk.MaxAttempts > 0,
+			uuid.New(), tk.Kind, state, runAtOffsetSecs, tk.MaxAttempts, tk.MaxAttempts > 0,
 			payload, string(metaJSON), p.TraceID, p.SpanID, nullableTraceFlags(p.TraceID, p.TraceFlags),
 			p.ID, tk.Key, tk.CompensationKind, nullableRawJSON(tk.CompensationPayload),
 			tk.SignalName, tk.IgnoreDeadDeps,
@@ -228,7 +231,7 @@ func (s *Store) Signal(ctx context.Context, workflowID uuid.UUID, name string, p
 // satisfied when it succeeded; a task with ignore_dead_deps also tolerates dead
 // or cancelled dependencies. Only running and compensating workflows promote. A
 // dependency edge whose task is missing keeps the task blocked (the inner NOT
-// EXISTS finds no satisfying row), matching the fake.
+// EXISTS finds no satisfying row).
 const promoteUnblockedSQL = `
 UPDATE azync_jobs t SET
 	state = CASE t.kind WHEN '$signal' THEN 'waiting' WHEN '$sleep' THEN 'scheduled' ELSE 'pending' END,
@@ -871,7 +874,10 @@ var workflowTasksSQL = `SELECT ` + jobColumns("azync_jobs") +
 	` FROM azync_jobs WHERE workflow_id = $1 AND source = 'workflow' ORDER BY created_at, id`
 
 // WorkflowTasks returns every task job of the workflow (compensation tasks
-// included) in creation order, or a not-found error when it does not exist.
+// included) ordered by created_at then id — tasks inserted in the same atomic
+// batch share created_at, so their relative order is stable, not the
+// declaration order. It returns a not-found error when the workflow does not
+// exist.
 func (s *Store) WorkflowTasks(ctx context.Context, id uuid.UUID) ([]driver.Job, error) {
 	if err := s.requireWorkflow(ctx, "workflow tasks", id); err != nil {
 		return nil, err

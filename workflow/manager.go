@@ -84,7 +84,7 @@ type TaskView struct {
 	MaxAttempts int
 	// RunAt is when the task becomes (or became) due.
 	RunAt time.Time
-	// CompletedAt is zero until the task succeeded.
+	// CompletedAt is zero until the task completed (succeeded or cancelled).
 	CompletedAt time.Time
 	// LastError is the most recent failure message.
 	LastError string
@@ -113,9 +113,11 @@ func (m *Manager) Get(ctx context.Context, id uuid.UUID) (*WorkflowView, error) 
 	return view, nil
 }
 
-// Tasks returns every task of the workflow (compensation tasks included) in
-// creation order, or nil when the workflow does not exist (a workflow always
-// has at least one task, so nil unambiguously means absence).
+// Tasks returns every task of the workflow (compensation tasks included)
+// ordered by creation time — compensations follow the original tasks; the
+// relative order of tasks inserted together at Run is stable, not the
+// declaration order — or nil when the workflow does not exist (a workflow
+// always has at least one task, so nil unambiguously means absence).
 func (m *Manager) Tasks(ctx context.Context, id uuid.UUID) ([]TaskView, error) {
 	jobs, err := m.store.WorkflowTasks(ctx, id)
 	if err != nil {
