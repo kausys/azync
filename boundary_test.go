@@ -12,7 +12,7 @@ import (
 // TestPackageBoundaries enforces the module's architectural boundaries by
 // walking every Go source file in the root module and checking its imports:
 //
-//   - the queue and event runtimes never import each other;
+//   - the queue, event and workflow runtimes never import each other;
 //   - no root-module file (tests included) imports a concrete persistence
 //     dependency (pgx, gorm, goose, or database/sql) — those live only in the
 //     separate driver/azyncpgx module;
@@ -20,7 +20,7 @@ import (
 //     github.com/google/uuid.
 //
 // The separate modules driver/azyncpgx and examples are excluded. The walker
-// tolerates the queue/ and event/ directories not yet existing.
+// tolerates the runtime directories not yet existing.
 func TestPackageBoundaries(t *testing.T) {
 	t.Parallel()
 
@@ -89,20 +89,29 @@ func assertNoPersistenceDependency(t *testing.T, filePath, importPath string) {
 	}
 }
 
-// assertRuntimeIsolation forbids the queue and event runtimes from importing
-// each other; they compose only through the shared core.
+// assertRuntimeIsolation forbids the queue, event and workflow runtimes from
+// importing one another; they compose only through the shared core.
 func assertRuntimeIsolation(t *testing.T, filePath, importPath string) {
 	t.Helper()
-	const (
-		queuePkg = "github.com/kausys/azync/queue"
-		eventPkg = "github.com/kausys/azync/event"
-	)
-	slash := filePath
-	if strings.HasPrefix(slash, "queue/") && underPackage(importPath, eventPkg) {
-		t.Errorf("%s (queue) imports the event runtime %q", filePath, importPath)
+	runtimes := []struct{ dir, pkg string }{
+		{"queue/", "github.com/kausys/azync/queue"},
+		{"event/", "github.com/kausys/azync/event"},
+		{"workflow/", "github.com/kausys/azync/workflow"},
 	}
-	if strings.HasPrefix(slash, "event/") && underPackage(importPath, queuePkg) {
-		t.Errorf("%s (event) imports the queue runtime %q", filePath, importPath)
+	for _, self := range runtimes {
+		if !strings.HasPrefix(filePath, self.dir) {
+			continue
+		}
+		for _, other := range runtimes {
+			if other.pkg == self.pkg {
+				continue
+			}
+			if underPackage(importPath, other.pkg) {
+				t.Errorf("%s (%s) imports the %s runtime %q",
+					filePath, strings.TrimSuffix(self.dir, "/"),
+					strings.TrimSuffix(other.dir, "/"), importPath)
+			}
+		}
 	}
 }
 
