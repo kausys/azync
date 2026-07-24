@@ -4,8 +4,8 @@ go 1.26.5
 
 require (
 	github.com/google/uuid v1.6.0
-	github.com/kausys/azync v0.0.2
-	github.com/kausys/azync/driver/azyncpgx v0.0.2
+	github.com/kausys/azync v0.0.3
+	github.com/kausys/azync/driver/azyncpgx v0.0.3
 )
 
 require (
