@@ -347,6 +347,15 @@ type failedWorkflow struct {
 // PromoteUnblocked/CompleteDueSleeps and before CompleteWorkflows on the worker's
 // tick: a workflow whose dead task triggers is moved out of 'running' here, so
 // only tolerated deaths remain for CompleteWorkflows to settle.
+//
+// Concurrency: triggeringDeadTasksSQL reads without a lock, so two concurrent
+// ticks (or a tick racing a manual CompensateWorkflow/CancelWorkflow) can both
+// observe the same workflow as 'running' under READ COMMITTED. The
+// cancel/compensate branch below re-acquires the workflow row with
+// lockWorkflowForUpdate and re-checks its state before touching any task rows:
+// the loser of the race sees a state that already left 'running' and skips
+// cleanly instead of racing insertCompensations's guard, which would otherwise
+// violate the (workflow_id, task_key) unique index.
 func (s *Store) ApplyFailurePolicy(ctx context.Context) ([]driver.WorkflowFailure, error) {
 	tx, err := s.pool.Begin(ctx)
 	if err != nil {
@@ -401,6 +410,17 @@ func (s *Store) ApplyFailurePolicy(ctx context.Context) ([]driver.WorkflowFailur
 				return nil, fmt.Errorf("azyncpgx: suspend workflow: %w", err)
 			}
 		} else {
+			state, err := s.lockWorkflowForUpdate(ctx, tx, wid)
+			if err != nil {
+				return nil, err
+			}
+			if state != string(driver.WorkflowRunning) {
+				// A concurrent tick already moved this workflow out of
+				// running (it won the compensation-insert race, or a manual
+				// CompensateWorkflow/CancelWorkflow call landed first):
+				// nothing left for this tick to do.
+				continue
+			}
 			if err := s.cancelRemainingTasks(ctx, tx, wid); err != nil {
 				return nil, err
 			}
@@ -432,6 +452,22 @@ func (s *Store) ApplyFailurePolicy(ctx context.Context) ([]driver.WorkflowFailur
 // deadTasksReason renders the FailureReason from sorted dead task keys.
 func deadTasksReason(keys []string) string {
 	return "dead tasks: " + strings.Join(keys, ", ")
+}
+
+// lockWorkflowForUpdate takes the row lock on the workflow header (FOR UPDATE)
+// and returns its current state. Callers on the cancel/compensate path
+// (ApplyFailurePolicy, CompensateWorkflow) take this lock before touching any
+// task row and re-check the returned state against what they expect: it is the
+// serialization point that makes concurrent ticks on the same workflow safe,
+// since the compensation-insert guard in insertCompensations is a plain SELECT
+// count(*) that is not by itself race-free under READ COMMITTED. Callers run
+// inside a transaction; the lock releases on commit or rollback.
+func (s *Store) lockWorkflowForUpdate(ctx context.Context, q querier, id uuid.UUID) (string, error) {
+	var state string
+	if err := q.QueryRow(ctx, `SELECT state FROM azync_workflows WHERE id = $1 FOR UPDATE`, id).Scan(&state); err != nil {
+		return "", fmt.Errorf("azyncpgx: lock workflow: %w", err)
+	}
+	return state, nil
 }
 
 const cancelRemainingTasksSQL = `
@@ -474,7 +510,12 @@ WHERE o.workflow_id = $1 AND o.source = 'workflow' AND o.task_key = $2`
 // rest blocked on their predecessor). It returns the total number of
 // compensation tasks the workflow has; a workflow that already carries a chain
 // is left untouched (guard against double insertion after a policy pass followed
-// by a manual compensate). Callers run inside a transaction.
+// by a manual compensate). This guard is a plain SELECT count(*) and is not by
+// itself race-free under READ COMMITTED against a second concurrent
+// cancel/compensate transaction on the same workflow; callers MUST hold the
+// workflow row lock from lockWorkflowForUpdate before calling this, which
+// serializes the two and makes the guard authoritative. Callers run inside a
+// transaction.
 func (s *Store) insertCompensations(ctx context.Context, q querier, workflowID uuid.UUID) (int, error) {
 	var existing int
 	if err := q.QueryRow(ctx,
@@ -892,6 +933,14 @@ func (s *Store) RetryWorkflow(ctx context.Context, id uuid.UUID) error {
 
 // CompensateWorkflow manually triggers compensation on a running or suspended
 // workflow, exactly like the OnFailureCancel policy.
+//
+// Concurrency: the initial state read takes the row lock (FOR UPDATE) so it
+// serializes against a concurrent ApplyFailurePolicy tick or another
+// CompensateWorkflow call on the same workflow id. The loser blocks until the
+// winner commits, then observes the post-commit state: no longer
+// running/suspended, so it returns the same not-found this call already
+// returns for a workflow that never qualified, instead of racing
+// insertCompensations's guard into a unique-violation.
 func (s *Store) CompensateWorkflow(ctx context.Context, id uuid.UUID) error {
 	tx, err := s.pool.Begin(ctx)
 	if err != nil {
@@ -900,7 +949,7 @@ func (s *Store) CompensateWorkflow(ctx context.Context, id uuid.UUID) error {
 	defer func() { _ = tx.Rollback(ctx) }()
 
 	var state string
-	err = tx.QueryRow(ctx, `SELECT state FROM azync_workflows WHERE id = $1`, id).Scan(&state)
+	err = tx.QueryRow(ctx, `SELECT state FROM azync_workflows WHERE id = $1 FOR UPDATE`, id).Scan(&state)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return driver.NewNotFound("compensate workflow")
 	}
