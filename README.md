@@ -12,6 +12,7 @@ Durable background jobs and a CQRS event bus for Go, unified over a single table
 - **Transactional enqueue/publish with your own data.** `TxProducer`/`TxPublisher` enlist the insert in your own backend transaction — a real outbox, so a rollback means no job and no event, not a partial write.
 - **A driver abstraction, not a PostgreSQL-only library.** `driver.Store` is a public, frozen contract. `azyncpgx` is the first-party PostgreSQL implementation; third-party backends validate themselves against the same conformance suite it is held to.
 - **Lease fencing and a reaper, proven by tests.** At-least-once delivery that means what it says: a worker that lost its lease cannot settle a job another worker now owns, and jobs stuck behind a dead worker are reclaimed instead of lost.
+- **Durable DAG workflows, same table.** Declare a static task graph — dependencies, durable timers, signals, typed task results, saga compensation and a per-workflow failure policy — run by the same at-least-once machinery as a third `source` alongside queue and event. The DAG is data, not code: no workflow-as-code, no replay.
 
 ## Installation
 
@@ -163,6 +164,151 @@ func main() {
 }
 ```
 
+## Workflows
+
+A workflow is a durable DAG of tasks declared up front and run by the same job machinery as queues and events, under a third `source`. It adds the primitives multi-step flows need without a workflow-as-code engine:
+
+- **Typed task results** — a handler returns `(R, error)`; `R` is persisted with the task and any downstream task reads it with `ResultOf[R](ctx, key)`.
+- **Durable, interruptible timers** — `Sleep` parks a branch for a duration with no worker held; a signal named after it wakes it early.
+- **Signals** — `WaitSignal` parks until `Client.Signal(id, name, payload)` delivers; the payload becomes the task's result.
+- **Polling-wait** — a handler that finds its external condition not met returns `NotReady(d)` and re-checks after `d` **without consuming a retry** — the primitive for waiting on a provider with no callback.
+- **Saga compensation** — a task may declare `Compensate(args)`; on failure the compensations of the succeeded tasks run in reverse completion order.
+
+```go
+package main
+
+import (
+	"context"
+	"log"
+	"time"
+
+	"github.com/kausys/azync"
+	"github.com/kausys/azync/workflow"
+
+	// Blank import registers the "postgres" DSN scheme.
+	_ "github.com/kausys/azync/driver/azyncpgx"
+)
+
+type CreateAccount struct {
+	Email string `json:"email"`
+}
+
+func (CreateAccount) Kind() string { return "onboard.create_account" }
+
+// Account is CreateAccount's durable result, read downstream with ResultOf.
+type Account struct {
+	ID string `json:"id"`
+}
+
+type Activate struct{}
+
+func (Activate) Kind() string { return "onboard.activate" }
+
+func main() {
+	ctx := context.Background()
+
+	core, err := azync.Open("postgres://azync:azync@localhost:5432/azync?sslmode=disable")
+	if err != nil {
+		log.Fatal(err)
+	}
+	defer core.Close(ctx)
+
+	if err := core.Migrate(ctx); err != nil {
+		log.Fatal(err)
+	}
+
+	wf, err := workflow.New(core)
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	// A handler returns (result, error); the result is persisted with the task.
+	// A task with no output returns workflow.None.
+	if err := workflow.Register(wf.Worker(), func(ctx context.Context, c CreateAccount) (Account, error) {
+		return Account{ID: "acct_1"}, nil
+	}); err != nil {
+		log.Fatal(err)
+	}
+	if err := workflow.Register(wf.Worker(), func(ctx context.Context, _ Activate) (workflow.None, error) {
+		acct, err := workflow.ResultOf[Account](ctx, "create")
+		if err != nil {
+			return workflow.None{}, err
+		}
+		log.Printf("activating %s (attempt %d)", acct.ID, workflow.Attempt(ctx))
+		return workflow.None{}, nil
+	}); err != nil {
+		log.Fatal(err)
+	}
+
+	go func() {
+		if err := wf.Worker().Start(ctx); err != nil {
+			log.Fatal(err)
+		}
+	}()
+	<-wf.Worker().Ready()
+
+	// Declare the DAG: create -> cooldown (durable timer) -> approved (signal) ->
+	// activate. Run validates it (unique keys, existing deps, no cycles) and
+	// inserts the whole graph atomically.
+	def := workflow.Define("onboard").
+		Task("create", CreateAccount{Email: "ada@example.com"}).
+		Sleep("cooldown", 24*time.Hour, workflow.After("create")).
+		WaitSignal("approved", workflow.After("cooldown")).
+		Task("activate", Activate{}, workflow.After("approved"))
+
+	res, err := wf.Client().Run(ctx, def)
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	// Later — from a webhook, a timer, an operator: a signal named after the
+	// Sleep wakes it early; one named after the WaitSignal delivers a payload.
+	// Signal returns an error wrapping ErrNoSignalMatched when nothing is waiting.
+	_ = wf.Client().Signal(ctx, res.ID, "cooldown", nil)
+	_ = wf.Client().Signal(ctx, res.ID, "approved", map[string]string{"by": "ops"})
+
+	select {} // a real service blocks on its signal context instead
+}
+```
+
+`workflow.Open(dsn, ...)` builds a runtime that owns a private `Core`, mirroring `queue.Open` / `event.Open`.
+
+### Failure policy
+
+Each workflow declares at `Define` time how a dead task (aborted, or out of retries) is handled:
+
+- **`Cancel`** (the default) cancels the remaining tasks, runs the compensation chain of the succeeded tasks that declared one, and settles the workflow `failed`.
+- **`Suspend`** parks the workflow as `suspended` and leaves its tasks untouched, so an operator decides through the `Manager`.
+
+```go
+def := workflow.Define("payment", workflow.OnFailure(workflow.Suspend)).
+	Task("charge", Charge{Amount: 42}, workflow.Compensate(Refund{Amount: 42})).
+	Task("ship", Ship{}, workflow.After("charge"))
+```
+
+The `Manager` is the pure-library admin surface (no auth, no HTTP — embed it behind your own ops endpoints): `Get`, `Tasks` and `List` inspect; `Retry` resets dead tasks with a fresh budget and resumes (or re-enters compensation), `Compensate` triggers the saga manually, and `Cancel` stops a workflow without compensating.
+
+### Barrier: idempotent fan-in across workflows
+
+`Run` is safe to call from inside a task handler of another workflow. Combined with `WithIdempotencyKey` it is a fan-in barrier: any number of upstream workflows whose last task calls `Run` with the same `(name, key)` collectively start exactly one downstream workflow — the winning `Run` inserts, the rest return the winner's id with `Deduplicated == true`. The task's at-least-once re-execution is absorbed by the same key, so it replaces a distributed lock.
+
+```go
+// The last task of each upstream workflow, once its siblings are all done:
+res, err := wf.Client().Run(ctx, businessDef, workflow.WithIdempotencyKey(kybID))
+if err != nil {
+	return workflow.None{}, err
+}
+// Exactly one caller sees res.Deduplicated == false; that run started the flow.
+```
+
+`TxRunner[pgx.Tx](wf)` creates a workflow inside your own transaction (the outbox pattern), exactly like `queue.TxProducer`.
+
+### Retention
+
+Terminal workflows (`succeeded`, `failed`, `cancelled`) are removed by the workflow vacuum after `WithWorkflowRetention` (default 30 days; `0` retains forever), together with their task jobs and dependency edges. A succeeded task's row and result live for **as long as its workflow does**, regardless of `WithCompletedRetention`: workflow task jobs are exempt from that sweep, so a task parked behind a long `Sleep` or `WaitSignal` never loses the result `ResultOf` depends on.
+
+See `examples/workflow-basic` for a full braid-style flow: a typed chain, a `NotReady` provider poll, a signal delivered by a simulated webhook, a fan-out, and an idempotent barrier that launches a second workflow.
+
 ## Shared core
 
 A single `Core` can back both runtimes at once, sharing one connection pool, one schema and one migrations table:
@@ -225,17 +371,21 @@ The same pattern applies to events via `event.TxPublisher[TTx]` and `PublishTx`.
 
 Migrate creates:
 
-- `azync_jobs` — the unified job table (queue jobs and event deliveries, partitioned by `source`).
+- `azync_jobs` — the unified job table (queue jobs, event deliveries and workflow tasks, partitioned by `source`).
 - `azync_events` — the append-only event ledger.
 - `azync_subscribers` — durable subscriber registrations.
 - `azync_job_attempts` — per-attempt failure history.
 - `azync_idempotency_keys` — time-window dedupe reservations.
 - `azync_stats_daily` — sharded daily throughput counters.
+- `azync_workflows` — the workflow header (one row per execution: lifecycle state, failure policy, idempotency key).
+- `azync_workflow_deps` — the static DAG edges and the compensation chain.
 - the migrations version table itself.
+
+**Down-migration limitation.** The workflow migration is safe to roll back only on a schema with no workflow data. Its down step narrows the `azync_jobs` `source` and `state` CHECK constraints back to the queue/event-only sets and drops the workflow tables (`ON DELETE CASCADE`); if any workflow row still exists — a job with `source = 'workflow'` or in a workflow-only state (`blocked`, `waiting`, `cancelled`), or any row in `azync_workflows` — re-adding the narrowed CHECK fails and the rollback aborts. Drain and vacuum workflows before rolling back.
 
 ## Architecture
 
-Everything is a job. `azync_jobs` is one table with a `source` discriminator (`queue` and `event` today, with room for a third value once a workflow runtime lands); a queue `Worker` and an event `Worker` each operate one source in isolation, so a queue never leases an event delivery and vice versa. Event bodies live separately, in the insert-only `azync_events` ledger: a delivery job carries no payload of its own, it is rehydrated by joining the ledger on dequeue, which is what makes `Manager.Replay` possible without the original `Publish` call.
+Everything is a job. `azync_jobs` is one table with a `source` discriminator (`queue`, `event` and `workflow`); a queue `Worker`, an event `Worker` and a workflow `Worker` each operate one source in isolation, so a queue never leases an event delivery or a workflow task, and vice versa. Event bodies live separately, in the insert-only `azync_events` ledger: a delivery job carries no payload of its own, it is rehydrated by joining the ledger on dequeue, which is what makes `Manager.Replay` possible without the original `Publish` call.
 
 A job moves through a small state machine:
 
@@ -260,6 +410,7 @@ Other structural pieces:
 - **Sharded daily stats.** Throughput counters are written to `azync_stats_daily` across slots (0–7 in `azyncpgx`) so concurrent enqueues on a hot kind don't serialize on one counter row.
 - **Retention.** `CompletedRetention` (default 7 days) bounds how long succeeded jobs are kept before a vacuum trims them; `StatsRetention` (default 35 days) bounds the daily counters. Either set to `0` means keep forever.
 - **LISTEN/NOTIFY as acceleration, polling as correctness.** `azyncpgx` keeps one dedicated LISTEN connection to wake fetch loops instantly on `Enqueue`/`Publish`. It is an optimization, not a dependency: the polling loop underneath is what a fetch loop actually relies on for correctness, so a missed notification (a connection blip) is caught on the next poll, and `PollOnly()` (or a driver without `Notifier`) still works, just at polling latency.
+- **Set-based workflow scheduler.** The DAG machinery is a handful of set-based, idempotent SQL passes (promote unblocked tasks, complete due timers, apply the failure policy, settle finished workflows) rather than a per-workflow actor. The header carries the lifecycle state — `running`, `suspended`, `compensating`, `succeeded`, `failed`, `cancelled` — and tasks carry `blocked`, `waiting` and `cancelled` on top of the shared job states. Because every pass is idempotent, any number of workflow `Worker`s run the scheduler on their own tick with no leader election.
 
 ## Configuration
 
@@ -267,21 +418,23 @@ Settings resolve in layers: a runtime-specific option (`queue.With*` / `event.Wi
 
 | Setting | Core option | Runtime override | Default |
 |---|---|---|---|
-| Lease TTL | `WithLeaseTTL` | `queue.WithLeaseTTL`, `event.WithLeaseTTL` | 30s |
-| Default retry budget | `WithDefaultMaxAttempts` | `queue.WithDefaultMaxRetries`, `event.WithDefaultMaxAttempts` | 25 |
-| Shutdown drain | `WithShutdownDrain` | `queue.WithShutdownDrain`, `event.WithShutdownDrain` | 25s |
-| Max concurrency (whole runtime) | `WithMaxConcurrency` | `queue.WithMaxConcurrency`, `event.WithMaxConcurrency` | 64 |
-| Default per-kind concurrency | `WithDefaultConcurrency` | `queue.WithDefaultConcurrency`, `event.WithDefaultConcurrency` | 4 |
-| Fetch batch size | `WithFetchBatchSize` | `queue.WithFetchBatchSize`, `event.WithFetchBatchSize` | 10 |
-| Fetch poll interval | `WithFetchPollInterval` | `queue.WithFetchPollInterval`, `event.WithFetchPollInterval` | 1s |
-| Fetch cooldown | `WithFetchCooldown` | `queue.WithFetchCooldown`, `event.WithFetchCooldown` | 100ms |
-| Idle backoff cap | `WithIdleBackoffMax` | `queue.WithIdleBackoffMax`, `event.WithIdleBackoffMax` | 2s |
-| Max reaps before death | `WithMaxReaps` | `queue.WithMaxReaps`, `event.WithMaxReaps` | 5 |
-| Stats retention | `WithStatsRetention` | `queue.WithStatsRetention`, `event.WithStatsRetention` | 35 days (0 = forever) |
+| Lease TTL | `WithLeaseTTL` | `queue.WithLeaseTTL`, `event.WithLeaseTTL`, `workflow.WithLeaseTTL` | 30s |
+| Default retry budget | `WithDefaultMaxAttempts` | `queue.WithDefaultMaxRetries`, `event.WithDefaultMaxAttempts`, `workflow.WithDefaultMaxRetries` | 25 |
+| Shutdown drain | `WithShutdownDrain` | `queue.WithShutdownDrain`, `event.WithShutdownDrain`, `workflow.WithShutdownDrain` | 25s |
+| Max concurrency (whole runtime) | `WithMaxConcurrency` | `queue.WithMaxConcurrency`, `event.WithMaxConcurrency`, `workflow.WithMaxConcurrency` | 64 |
+| Default per-kind concurrency | `WithDefaultConcurrency` | `queue.WithDefaultConcurrency`, `event.WithDefaultConcurrency`, `workflow.WithDefaultConcurrency` | 4 |
+| Fetch batch size | `WithFetchBatchSize` | `queue.WithFetchBatchSize`, `event.WithFetchBatchSize`, `workflow.WithFetchBatchSize` | 10 |
+| Fetch poll interval | `WithFetchPollInterval` | `queue.WithFetchPollInterval`, `event.WithFetchPollInterval`, `workflow.WithFetchPollInterval` | 1s |
+| Fetch cooldown | `WithFetchCooldown` | `queue.WithFetchCooldown`, `event.WithFetchCooldown`, `workflow.WithFetchCooldown` | 100ms |
+| Idle backoff cap | `WithIdleBackoffMax` | `queue.WithIdleBackoffMax`, `event.WithIdleBackoffMax`, `workflow.WithIdleBackoffMax` | 2s |
+| Max reaps before death | `WithMaxReaps` | `queue.WithMaxReaps`, `event.WithMaxReaps`, `workflow.WithMaxReaps` | 5 |
+| Stats retention | `WithStatsRetention` | `queue.WithStatsRetention`, `event.WithStatsRetention`, `workflow.WithStatsRetention` | 35 days (0 = forever) |
 | Completed job retention | `WithCompletedRetention` | `queue.WithCompletedRetention`, `event.WithCompletedRetention` | 7 days (0 = forever) |
 | Logger | `WithLogger` | — | `slog.Default()` |
 | Job wall-clock timeout (queue only) | — | `queue.WithDefaultJobTimeout` (runtime), `queue.WithJobTimeout` (per kind, via `Register`) | 5m |
 | Handler wall-clock timeout (event only) | — | `event.WithHandlerTimeout` | 5m |
+| Task wall-clock timeout (workflow only) | — | `workflow.WithDefaultTaskTimeout` (runtime), `workflow.WithTaskTimeout` (per kind, via `Register`) | 5m |
+| Terminal workflow retention (workflow only) | — | `workflow.WithWorkflowRetention` | 30 days (0 = forever) |
 | Cron enabled (queue only) | — | `queue.WithCron(bool)` | true |
 | Cron leader-check tick (queue only) | — | `queue.WithCronTick` | 30s |
 | Schema (infra, `Open` only) | `WithSchema` | — | backend default |
@@ -289,7 +442,9 @@ Settings resolve in layers: a runtime-specific option (`queue.With*` / `event.Wi
 | Migrations table (infra, `Open` only) | `WithMigrationsTable` | — | `azync_migrations` |
 | Poll-only, no LISTEN/NOTIFY (infra, `Open` only) | `PollOnly()` | — | disabled (push enabled) |
 
-`queue.Open` / `event.Open` accept `WithCoreOptions(...)` to forward `azync.Option`s to the private `Core` they build internally; it is rejected by `New`, which composes over an already-built `Core`.
+`queue.Open` / `event.Open` / `workflow.Open` accept `WithCoreOptions(...)` to forward `azync.Option`s to the private `Core` they build internally; it is rejected by `New`, which composes over an already-built `Core`.
+
+Workflow task jobs are exempt from `WithCompletedRetention`: a succeeded task's row lives until its workflow is vacuumed (`WithWorkflowRetention`), never trimmed by the completed-job sweep — see [Workflows › Retention](#retention).
 
 ### Bring your own logger
 
@@ -333,7 +488,10 @@ Validate a new driver against the public conformance suite instead of hand-writi
 
 ## Roadmap
 
-- **Workflows** — DAG-style multi-step jobs, modeled as tasks in the same `azync_jobs` table with dependencies between tasks, using a third `source` value alongside today's `queue` and `event`.
+- **Workflow-as-code / replay** — an alternative to the declared DAG, where control flow is ordinary Go re-executed deterministically.
+- **Scheduled workflows** — cron-triggered workflow runs, the way `queue.RegisterCron` schedules jobs.
+- **Child workflows** — first-class parent/child links, beyond today's idempotent `Run`-from-a-handler barrier.
+- **An admin UI** over the `Manager` surfaces.
 - A **`database/sql`** driver, for backends `pgx` does not cover.
 - More storage backends beyond PostgreSQL.
 
