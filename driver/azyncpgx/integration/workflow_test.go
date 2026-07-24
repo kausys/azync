@@ -159,8 +159,8 @@ func (provisionPoll) Kind() string { return "wf.it.poll" }
 // TestWorkflowNotReadyPollsWithoutConsumingBudget proves the polling-wait
 // primitive over a live backend: a task that returns NotReady several times
 // before succeeding re-checks each time without burning an attempt, so it
-// completes within a retry budget of one — the value braid's CIP-status poll
-// depends on.
+// completes within a retry budget of one — the primitive for polling a
+// provider that exposes no callback.
 func TestWorkflowNotReadyPollsWithoutConsumingBudget(t *testing.T) {
 	is := require.New(t)
 	h := newHarness(t)
@@ -408,11 +408,11 @@ type businessStart struct{}
 
 func (businessStart) Kind() string { return "wf.it.business.start" }
 
-// TestWorkflowBarrierStartsDownstreamExactlyOnce replicates braid's fan-in: N
+// TestWorkflowBarrierStartsDownstreamExactlyOnce drives a fan-in barrier: N
 // concurrent "ubo" workflows each end by calling Run on the same downstream
 // definition with a shared idempotency key. Exactly one insert must win and the
 // downstream "business" workflow must run exactly once — the live-execution
-// dedupe replacing braid's Redis SetNX lock and its task-id-conflict swallow.
+// dedupe replacing a distributed lock.
 func TestWorkflowBarrierStartsDownstreamExactlyOnce(t *testing.T) {
 	is := require.New(t)
 	h := newHarness(t)

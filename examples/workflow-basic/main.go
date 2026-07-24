@@ -3,11 +3,11 @@
 // against an external provider, a signal delivered by a simulated webhook, a
 // fan-out, and a final idempotent barrier that launches a second workflow.
 //
-// It is the migration template for a braid-style KYC flow: a linear chain
-// enriched step by step through ResultOf, a NotReady poll that waits on an
-// external condition without burning retries, and a Run(WithIdempotencyKey)
-// barrier that replaces a Redis SetNX lock with the engine's own live-execution
-// dedupe. The program runs the flow to completion and exits.
+// It mirrors a real KYC onboarding flow: a linear chain enriched step by step
+// through ResultOf, a NotReady poll that waits on an external condition
+// without burning retries, and a Run(WithIdempotencyKey) barrier that replaces
+// a distributed lock with the engine's own live-execution dedupe. The program
+// runs the flow to completion and exits.
 package main
 
 import (
@@ -180,8 +180,7 @@ func run() error {
 		Task("finalize", finalize{}, workflow.After("provision", "notify"))
 
 	// WithIdempotencyKey makes the whole run idempotent: a re-run with the same
-	// key while this one is live returns the existing id instead of a duplicate —
-	// the braid dedupe-on-start, replacing an asynq TaskID conflict.
+	// key while this one is live returns the existing id instead of a duplicate.
 	started, err := r.Client().Run(ctx, onboard, workflow.WithIdempotencyKey("onboard-"+businessID))
 	if err != nil {
 		return fmt.Errorf("run onboard-business: %w", err)

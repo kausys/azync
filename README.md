@@ -307,7 +307,7 @@ if err != nil {
 
 Terminal workflows (`succeeded`, `failed`, `cancelled`) are removed by the workflow vacuum after `WithWorkflowRetention` (default 30 days; `0` retains forever), together with their task jobs and dependency edges. A succeeded task's row and result live for **as long as its workflow does**, regardless of `WithCompletedRetention`: workflow task jobs are exempt from that sweep, so a task parked behind a long `Sleep` or `WaitSignal` never loses the result `ResultOf` depends on.
 
-See `examples/workflow-basic` for a full braid-style flow: a typed chain, a `NotReady` provider poll, a signal delivered by a simulated webhook, a fan-out, and an idempotent barrier that launches a second workflow.
+See `examples/workflow-basic` for a full onboarding-style flow: a typed chain, a `NotReady` provider poll, a signal delivered by a simulated webhook, a fan-out, and an idempotent barrier that launches a second workflow.
 
 ## Shared core
 
@@ -444,7 +444,7 @@ Settings resolve in layers: a runtime-specific option (`queue.With*` / `event.Wi
 
 `queue.Open` / `event.Open` / `workflow.Open` accept `WithCoreOptions(...)` to forward `azync.Option`s to the private `Core` they build internally; it is rejected by `New`, which composes over an already-built `Core`.
 
-Workflow task jobs are exempt from `WithCompletedRetention`: a succeeded task's row lives until its workflow is vacuumed (`WithWorkflowRetention`), never trimmed by the completed-job sweep — see [Workflows › Retention](#retention).
+Workflow task jobs are exempt from `WithCompletedRetention` — which is why there is deliberately no `workflow.` variant of that option: a succeeded task's row lives until its workflow is vacuumed (`workflow.WithWorkflowRetention`), never trimmed by the completed-job sweep — see [Workflows › Retention](#retention).
 
 ### Bring your own logger
 
