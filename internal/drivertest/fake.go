@@ -637,7 +637,10 @@ func (f *Fake) VacuumIdempotency(_ context.Context, source driver.Source) (int64
 	return removed, nil
 }
 
-// VacuumCompleted trims succeeded jobs of the source completed before retention ago.
+// VacuumCompleted trims succeeded jobs of the source completed before
+// retention ago. Workflow-owned jobs (WorkflowID != uuid.Nil) are exempt: their
+// lifecycle belongs to the workflow, cleaned up only by VacuumWorkflows'
+// terminal-workflow cascade.
 func (f *Fake) VacuumCompleted(_ context.Context, source driver.Source, retention time.Duration) (int64, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
@@ -647,7 +650,7 @@ func (f *Fake) VacuumCompleted(_ context.Context, source driver.Source, retentio
 	cutoff := f.now().Add(-retention)
 	var removed int64
 	for id, j := range f.jobs {
-		if j.Source == source && j.State == driver.StateSucceeded && j.CompletedAt.Before(cutoff) {
+		if j.Source == source && j.State == driver.StateSucceeded && j.CompletedAt.Before(cutoff) && j.WorkflowID == uuid.Nil {
 			delete(f.jobs, id)
 			delete(f.attempts, id)
 			removed++

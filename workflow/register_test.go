@@ -3,6 +3,7 @@ package workflow
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -146,6 +147,37 @@ func TestRegisterKindPersistsRawResultAndExposesContext(t *testing.T) {
 	results, err := f.TaskResults(context.Background(), id, nil)
 	is.NoError(err)
 	is.JSONEq(`{"ok":true}`, string(results["t"]), "the raw result is persisted verbatim")
+}
+
+func TestReportableDiesWhenBudgetExhausts(t *testing.T) {
+	t.Parallel()
+	is := require.New(t)
+	clk := drivertest.NewManualClock(time.Date(2026, 7, 22, 12, 0, 0, 0, time.UTC))
+	f := drivertest.NewFake()
+	f.Clock = clk
+	r := newTestRuntime(t, f)
+
+	var runs atomic.Int32
+	is.NoError(Register(r.Worker(), func(context.Context, regArgs) (None, error) {
+		runs.Add(1)
+		return None{}, Reportable(errors.New("keeps failing"))
+	}, WithMaxRetries(2)))
+
+	res, err := r.Client().Run(context.Background(), Define("reportable-wf").Task("t", regArgs{V: "x"}))
+	is.NoError(err)
+
+	startWorker(t, r.Worker())
+	// Attempt 1 fails -> scheduled at now+Backoff(1); make it due.
+	is.Eventually(func() bool {
+		return taskByKey(t, f, res.ID, "t").State == driver.StateScheduled
+	}, 2*time.Second, 2*time.Millisecond)
+	clk.Advance(time.Minute)
+
+	// Attempt 2 exhausts the budget: dead.
+	is.Eventually(func() bool {
+		return taskByKey(t, f, res.ID, "t").State == driver.StateDead
+	}, 2*time.Second, 2*time.Millisecond)
+	is.Equal(int32(2), runs.Load(), "Reportable must still retry like Retry, not abort early")
 }
 
 func TestNoneResultPersistsNothing(t *testing.T) {

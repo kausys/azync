@@ -101,7 +101,7 @@ func newRuntime(core *azync.Core, opts []Option, forOpen bool) (*Runtime, error)
 	})
 
 	r := &Runtime{core: core, cfg: cfg, store: store}
-	r.client = &Client{store: store, defaultMaxAttempts: cfg.DefaultMaxAttempts}
+	r.client = &Client{store: store}
 	r.worker = &Worker{
 		engine: eng,
 		cfg:    cfg,

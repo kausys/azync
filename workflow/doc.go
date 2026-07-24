@@ -59,7 +59,12 @@
 // A workflow moves through running -> succeeded | failed | cancelled, with
 // suspended (parked for an operator) and compensating (saga in flight)
 // alongside. Terminal workflows are removed by the vacuum after the configured
-// retention (WithWorkflowRetention, default 30 days; 0 retains forever).
+// retention (WithWorkflowRetention, default 30 days; 0 retains forever). A
+// succeeded task's row and result live for as long as its workflow does,
+// regardless of WithCompletedRetention: task jobs are exempt from that sweep
+// and are only ever removed as part of their own workflow's vacuum, so a task
+// parked behind a long Sleep or WaitSignal never loses the result ResultOf and
+// CompleteWorkflows depend on.
 //
 // # Execution
 //

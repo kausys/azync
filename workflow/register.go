@@ -16,10 +16,9 @@ import (
 type None = struct{}
 
 type registerOptions struct {
-	concurrency   int
-	maxRetries    int
-	maxRetriesSet bool
-	timeout       time.Duration
+	concurrency int
+	maxRetries  int
+	timeout     time.Duration
 }
 
 // RegisterOption customizes Register.
@@ -43,7 +42,6 @@ func WithMaxRetries(n int) RegisterOption {
 	return func(o *registerOptions) {
 		if n > 0 {
 			o.maxRetries = n
-			o.maxRetriesSet = true
 		}
 	}
 }

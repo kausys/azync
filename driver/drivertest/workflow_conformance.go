@@ -47,6 +47,7 @@ func RunWorkflowConformance(t *testing.T, newStore func(t *testing.T) driver.Sto
 	t.Run("AckTaskResultFencing", func(t *testing.T) { runWorkflowAckFencing(t, store, ws) })
 	t.Run("InternalKindsStayInternal", func(t *testing.T) { runWorkflowInternalKinds(t, store, ws) })
 	t.Run("Vacuum", func(t *testing.T) { runWorkflowVacuum(t, store, ws) })
+	t.Run("CompletedVacuumExemptsWorkflowTasks", func(t *testing.T) { runWorkflowCompletedVacuumExemption(t, store, ws) })
 }
 
 // ---- shared helpers -------------------------------------------------------
@@ -769,4 +770,57 @@ func runWorkflowVacuum(t *testing.T, store driver.Store, ws driver.WorkflowStore
 	is.True(driver.IsNotFound(err), "its task jobs cascade")
 	_, err = ws.GetWorkflow(ctx, live)
 	is.NoError(err, "a live workflow survives any retention")
+}
+
+// ---- VacuumCompleted exemption for workflow-owned jobs --------------------
+
+// runWorkflowCompletedVacuumExemption pins the design ruling that
+// VacuumCompleted must never touch workflow-owned jobs: a succeeded task can
+// sit for as long as the workflow keeps running behind it (a long Sleep or
+// WaitSignal further down the DAG), and the completed-job retention sweep must
+// never delete it out from under a still-running workflow — that would blind
+// ResultOf for downstream tasks and CompleteWorkflows itself. Their lifecycle
+// belongs to the workflow: only VacuumWorkflows' terminal-workflow cascade
+// removes them. A plain queue job of the same age is unaffected and is still
+// vacuumed normally.
+func runWorkflowCompletedVacuumExemption(t *testing.T, store driver.Store, ws driver.WorkflowStore) {
+	t.Helper()
+	ctx := context.Background()
+	is := require.New(t)
+
+	id := createWF(ctx, t, ws, driver.WorkflowParams{
+		Name: "wfc_vac_exempt",
+		Tasks: []driver.WorkflowTask{
+			wfTask("a", "wfc_vac_exempt_a"),
+			wfTask("b", "wfc_vac_exempt_b"),
+		},
+		Deps: []driver.WorkflowDep{{TaskKey: "b", DependsOnKey: "a"}},
+	})
+	finishWFTask(ctx, t, store, ws, "wfc_vac_exempt_a", json.RawMessage(`{"n":1}`))
+	is.Equal(driver.StateBlocked, wfTaskByKey(ctx, t, ws, id, "b").State,
+		"the workflow is still running: the downstream task is parked on its dependency")
+
+	queueID := enqueueDue(ctx, t, store, "wfc_vac_exempt_queue")
+	leased := dequeueN(ctx, t, store, driver.SourceQueue, "wfc_vac_exempt_queue", 1, time.Minute)
+	is.Len(leased, 1)
+	is.NoError(store.Ack(ctx, leased[0].ID, leased[0].LeaseToken))
+
+	time.Sleep(50 * time.Millisecond)
+
+	removed, err := store.VacuumCompleted(ctx, driver.SourceWorkflow, time.Millisecond)
+	is.NoError(err)
+	is.Zero(removed, "a succeeded workflow task must never be vacuumed by VacuumCompleted, at any retention")
+
+	removed, err = store.VacuumCompleted(ctx, driver.SourceQueue, time.Millisecond)
+	is.NoError(err)
+	is.GreaterOrEqual(removed, int64(1), "a plain queue job of the same age is vacuumed normally")
+
+	a := wfTaskByKey(ctx, t, ws, id, "a")
+	is.Equal(driver.StateSucceeded, a.State, "the succeeded upstream task row survives")
+	results, err := ws.TaskResults(ctx, id, []string{"a"})
+	is.NoError(err)
+	is.JSONEq(`{"n":1}`, string(results["a"]), "its persisted result survives, so ResultOf still resolves it")
+
+	_, err = store.GetJob(ctx, driver.SourceQueue, queueID)
+	is.True(driver.IsNotFound(err), "the plain queue job of the same age is gone")
 }

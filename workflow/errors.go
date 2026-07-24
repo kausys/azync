@@ -20,9 +20,10 @@ import (
 var ErrNoSignalMatched = errors.New("workflow: signal matched no waiting task")
 
 type taskError struct {
-	err   error
-	kind  engine.OutcomeKind
-	delay time.Duration
+	err        error
+	kind       engine.OutcomeKind
+	delay      time.Duration
+	reportable bool
 }
 
 func (e *taskError) Error() string { return e.err.Error() }
@@ -45,6 +46,12 @@ func RetryAfter(err error, d time.Duration) error {
 	return &taskError{err: err, kind: engine.OutcomeRetry, delay: d}
 }
 
+// Reportable retries like Retry but flags the error for loud reporting when
+// retries are exhausted.
+func Reportable(err error) error {
+	return &taskError{err: err, kind: engine.OutcomeRetry, reportable: true}
+}
+
 // NotReady parks the task for d and re-checks then, WITHOUT consuming the
 // retry budget: the polling-wait primitive. Unlike Retry it is not a failure —
 // no attempt is recorded, the attempt counter is handed back, and the task
@@ -62,7 +69,7 @@ func NotReady(d time.Duration) error {
 // classify maps a handler error to the engine outcome the executor settles by.
 func classify(err error) engine.Outcome {
 	if te, ok := errors.AsType[*taskError](err); ok {
-		return engine.Outcome{Kind: te.kind, Delay: te.delay}
+		return engine.Outcome{Kind: te.kind, Delay: te.delay, Reportable: te.reportable}
 	}
 	return engine.Outcome{Kind: engine.OutcomeRetry}
 }

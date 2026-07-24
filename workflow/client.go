@@ -17,8 +17,7 @@ import (
 // Client creates and signals workflows. The active trace is stamped
 // automatically so the task spans at execution time join the creator's trace.
 type Client struct {
-	store              driver.WorkflowStore
-	defaultMaxAttempts int
+	store driver.WorkflowStore
 }
 
 // RunResult reports the outcome of a Run.

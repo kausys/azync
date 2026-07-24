@@ -123,6 +123,13 @@ type Store interface {
 	// VacuumCompleted trims succeeded jobs of the source completed before
 	// retention ago and returns the rows removed. A retention <= 0 retains
 	// succeeded jobs forever and removes nothing.
+	//
+	// Workflow-owned jobs (WorkflowID != zero) are exempt regardless of
+	// retention: a task can be succeeded for the whole span of a long Sleep or
+	// WaitSignal further down its workflow, and deleting it here would blind
+	// ResultOf and CompleteWorkflows while the workflow is still running.
+	// Their lifecycle belongs to the workflow — they are removed only by
+	// VacuumWorkflows' terminal-workflow cascade, never by this method.
 	VacuumCompleted(ctx context.Context, source Source, retention time.Duration) (int64, error)
 
 	// ListKinds returns the distinct kinds of the source (from live jobs and stat
