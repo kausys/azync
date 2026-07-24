@@ -56,19 +56,15 @@ func TestConfigWorkflowOverrideWinsOverCore(t *testing.T) {
 func TestConfigExplicitZeroRetentionIsPreserved(t *testing.T) {
 	t.Parallel()
 	is := require.New(t)
-	core, err := azync.New(drivertest.NewFake(),
-		azync.WithLogger(discardLogger()),
-		azync.WithCompletedRetention(7*24*time.Hour))
+	core, err := azync.New(drivertest.NewFake(), azync.WithLogger(discardLogger()))
 	is.NoError(err)
 
 	// Explicit 0 at the workflow layer means "retain forever" and must not be
 	// swallowed back into the core default or the package default.
 	r, err := New(core,
-		WithCompletedRetention(0),
 		WithStatsRetention(0),
 		WithWorkflowRetention(0))
 	is.NoError(err)
-	is.Zero(r.cfg.CompletedRetention)
 	is.Zero(r.cfg.StatsRetention)
 	is.Zero(r.cfg.workflowRetention, "explicit 0 workflow retention retains terminal workflows forever")
 }
@@ -92,7 +88,6 @@ func TestConfigRejectsInvalidValues(t *testing.T) {
 		"WithFetchCooldown(0)":       WithFetchCooldown(0),
 		"WithIdleBackoffMax(0)":      WithIdleBackoffMax(0),
 		"WithStatsRetention(-1)":     WithStatsRetention(-time.Hour),
-		"WithCompletedRetention(-1)": WithCompletedRetention(-time.Hour),
 		"WithWorkflowRetention(-1)":  WithWorkflowRetention(-time.Hour),
 	} {
 		_, err := New(core, opt)

@@ -252,12 +252,6 @@ func WithStatsRetention(d time.Duration) Option {
 	return nonNegativeDuration("WithStatsRetention", d, func(c *config) { c.StatsRetention = d })
 }
 
-// WithCompletedRetention overrides how long succeeded task jobs are kept. A
-// negative value is rejected; zero means retain forever.
-func WithCompletedRetention(d time.Duration) Option {
-	return nonNegativeDuration("WithCompletedRetention", d, func(c *config) { c.CompletedRetention = d })
-}
-
 // WithWorkflowRetention overrides how long terminal workflows (succeeded,
 // failed or cancelled) are kept before the vacuum removes them together with
 // their task jobs and dependency edges (default 30 days). A negative value is
