@@ -17,7 +17,7 @@ func TestVacuumWorkflowsRemovesTerminalPastRetention(t *testing.T) {
 	f := drivertest.NewFake()
 	clk := drivertest.NewManualClock(time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC))
 	f.Clock = clk
-	r := newTestRuntime(t, f, WithRetention(time.Hour))
+	r := newTestRuntime(t, f, WithRetention(time.Hour), withVacuumInterval(time.Minute))
 
 	RegisterWorkflow(r.Worker(), "wf-vac", "1", func(ctx Context, _ struct{}) (struct{}, error) {
 		return struct{}{}, nil

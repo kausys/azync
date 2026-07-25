@@ -14,6 +14,9 @@ import (
 )
 
 // operationJobPayload is the durable body of a leased Operation task job.
+// JSON keys are snake_case — stable wire format for azync_jobs payloads.
+//
+//nolint:tagliatelle // durable wire format
 type operationJobPayload struct {
 	Name         string          `json:"name"`
 	Version      string          `json:"version"`
@@ -25,6 +28,8 @@ type operationJobPayload struct {
 
 // operationScheduledPayload is recorded in history when an Operation is
 // scheduled (before the leased job runs).
+//
+//nolint:tagliatelle // durable wire format
 type operationScheduledPayload struct {
 	Name         string          `json:"name"`
 	Version      string          `json:"version"`
@@ -35,6 +40,8 @@ type operationScheduledPayload struct {
 
 // operationResultPayload is the durable encoding of OperationCompleted /
 // OperationFailed.
+//
+//nolint:tagliatelle // durable wire format
 type operationResultPayload struct {
 	Name         string          `json:"name"`
 	Version      string          `json:"version"`
@@ -71,6 +78,8 @@ func ExecuteOperation(ctx Context, name, version string, input any) Future {
 				case kernel.EventOperationCompleted, kernel.EventOperationFailed:
 					c.cursor.Next()
 					return decodeOperationResult(name, ev2)
+				default:
+					// Other history events mean the Operation is still in flight.
 				}
 			}
 			// Still in flight (or uncertain): park until the executor / Manager wakes us.

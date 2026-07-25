@@ -65,7 +65,7 @@ func TestOperationRetryThenSucceed(t *testing.T) {
 	RegisterOperation(r.Worker(), "flaky", "1", func(_ context.Context, _ struct{}) (string, error) {
 		calls++
 		if calls < 2 {
-			return "", errString("transient")
+			return "", stringError("transient")
 		}
 		return "ok", nil
 	})
@@ -86,6 +86,6 @@ func TestOperationRetryThenSucceed(t *testing.T) {
 	is.JSONEq(`"ok"`, string(view.Result))
 }
 
-type errString string
+type stringError string
 
-func (e errString) Error() string { return string(e) }
+func (e stringError) Error() string { return string(e) }

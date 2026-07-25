@@ -18,13 +18,14 @@ import (
 
 	_ "github.com/kausys/azync/driver/azyncpgx"
 
-	"github.com/google/uuid"
 	"github.com/kausys/azync"
 	"github.com/kausys/azync/dag"
 	"github.com/kausys/azync/driver"
 	"github.com/kausys/azync/event"
 	"github.com/kausys/azync/queue"
 	"github.com/kausys/azync/workflow"
+
+	"github.com/google/uuid"
 )
 
 //nolint:gosec // matches compose.yml's dev-only DB
@@ -210,6 +211,8 @@ func awaitSettled(ctx context.Context, d *dag.Runtime, wf *workflow.Runtime, dag
 					switch v.State {
 					case dag.StateSucceeded, dag.StateFailed, dag.StateCancelled:
 						dagOK = true
+					default:
+						// still running / suspended / compensating
 					}
 				}
 			}
@@ -219,6 +222,8 @@ func awaitSettled(ctx context.Context, d *dag.Runtime, wf *workflow.Runtime, dag
 					case driver.WorkflowSucceeded, driver.WorkflowFailed, driver.WorkflowCancelled:
 						wfOK = true
 						slog.Info("workflow settled", "state", string(v.State))
+					default:
+						// still running / suspended
 					}
 				}
 			}
