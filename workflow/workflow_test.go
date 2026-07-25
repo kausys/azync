@@ -164,12 +164,14 @@ func drainUntilTerminal(t *testing.T, r *Runtime, id uuid.UUID, maxSteps int) dr
 	ctx := context.Background()
 	var view driver.WorkflowExecutionView
 	var err error
-	for i := 0; i < maxSteps; i++ {
+	for range maxSteps {
 		view, err = r.Manager().Get(ctx, id)
 		is.NoError(err)
 		switch view.State {
 		case driver.WorkflowSucceeded, driver.WorkflowFailed, driver.WorkflowCancelled:
 			return view
+		default:
+			// Still running or suspended — keep draining.
 		}
 		processed, err := r.Worker().ProcessNext(ctx)
 		is.NoError(err)

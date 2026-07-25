@@ -4,7 +4,7 @@ go 1.26.5
 
 require (
 	github.com/google/uuid v1.6.0
-	github.com/kausys/azync v0.0.0-00010101000000-000000000000
+	github.com/kausys/azync v0.0.1
 	github.com/kausys/azync/driver/azyncpgx v0.0.0-00010101000000-000000000000
 )
 
@@ -36,6 +36,6 @@ require (
 // for either. The go.work workspace resolves them the same way for ordinary
 // builds.
 replace (
-github.com/kausys/azync => ../
+	github.com/kausys/azync => ../
 	github.com/kausys/azync/driver/azyncpgx => ../driver/azyncpgx
 )

@@ -35,11 +35,6 @@ type Context interface {
 // interface, and the package's primitives (ExecuteOperation, Sleep,
 // WaitSignal, Select) recover the concrete type to reach the replay
 // machinery below.
-// wfContext is the concrete Context the worker builds for one replay pass.
-// It is not exported: workflow code only ever sees it through the Context
-// interface, and the package's primitives (ExecuteOperation, Sleep,
-// WaitSignal, Select) recover the concrete type to reach the replay
-// machinery below.
 //
 // ctx is retained so Operation handlers and store calls observe worker
 // cancellation; forwarding methods satisfy context.Context without embedding.
@@ -48,10 +43,10 @@ type Context interface {
 type wfContext struct {
 	ctx context.Context
 
-	workflowID   uuid.UUID
-	workflowName string
-	store        driver.WorkflowStore
-	operations   map[string]operationFunc
+	workflowID    uuid.UUID
+	workflowName  string
+	store         driver.WorkflowStore
+	operations    map[string]operationFunc
 	opMaxAttempts int
 
 	// history holds only the decision events ExecuteOperation and Sleep

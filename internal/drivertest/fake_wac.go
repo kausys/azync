@@ -267,6 +267,8 @@ func (f *Fake) ScheduleOperation(_ context.Context, p driver.ScheduleOperationPa
 			switch j.State {
 			case driver.StatePending, driver.StateScheduled, driver.StateActive, driver.StateUncertain:
 				return j.ID, nil
+			default:
+				// Terminal / non-live states do not satisfy the live-key dedupe.
 			}
 		}
 	}
