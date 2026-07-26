@@ -1,5 +1,16 @@
 # Changelog
 
+## [0.0.4](https://github.com/kausys/azync/compare/v0.0.3...v0.0.4) (2026-07-26)
+
+
+### ⚠ BREAKING CHANGES
+
+* driver.Store gains DeleteSubscriber and driver.WorkflowStore gains ListStalledWorkflows (custom driver implementations must add them); StartWorkflow/SignalWorkflow now atomically record history and schedule the task; queue.Worker.Start returns an error when crons are registered without a leader elector; Engine/Worker Start return nil instead of ctx.Err() on graceful shutdown.
+
+### Features
+
+* production hardening across driver, engine and all four runtimes ([a382d06](https://github.com/kausys/azync/commit/a382d068d9dbceeeaeba021c333bb1972c70a011))
+
 ## [0.0.3](https://github.com/kausys/azync/compare/v0.0.2...v0.0.3) (2026-07-26)
 
 
