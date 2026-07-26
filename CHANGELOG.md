@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.0.3](https://github.com/kausys/azync/compare/v0.0.2...v0.0.3) (2026-07-26)
+
+
+### Bug Fixes
+
+* move tenant and trace into metadata ([03bef2d](https://github.com/kausys/azync/commit/03bef2de57d8c60991aa77a3fef1cda311b43553))
+
 ## [0.0.2](https://github.com/kausys/azync/compare/v0.0.1...v0.0.2) (2026-07-25)
 
 
