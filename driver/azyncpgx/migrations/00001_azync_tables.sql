@@ -7,22 +7,16 @@
 CREATE TABLE azync_events (
     id             uuid PRIMARY KEY,
     type           text NOT NULL,
-    tenant_id      uuid NULL,
     aggregate_type text NOT NULL DEFAULT '',
     aggregate_id   text NOT NULL DEFAULT '',
     version        bigint NOT NULL DEFAULT 0,
     occurred_at    timestamptz NOT NULL,
     payload        jsonb NOT NULL,
     meta           jsonb NOT NULL DEFAULT '{}',
-    trace_id       text NULL,
-    span_id        text NULL,
-    trace_flags    smallint NULL,
     created_at     timestamptz NOT NULL DEFAULT now()
 );
 CREATE INDEX azync_events_type_occurred_idx ON azync_events (type, occurred_at, id);
 CREATE INDEX azync_events_occurred_idx ON azync_events (occurred_at, id);
-CREATE INDEX azync_events_tenant_occurred_idx ON azync_events (tenant_id, occurred_at, id)
-    WHERE tenant_id IS NOT NULL;
 
 -- azync_subscribers binds a named consumer to an event type with its own retry
 -- budget. Publish fans out one delivery per matching registration.
@@ -53,9 +47,6 @@ CREATE TABLE azync_jobs (
     reap_count            integer NOT NULL DEFAULT 0,
     payload               jsonb NULL,
     meta                  jsonb NOT NULL DEFAULT '{}',
-    trace_id              text NULL,
-    span_id               text NULL,
-    trace_flags           smallint NULL,
     idempotency_key       text NULL,
     event_id              uuid NULL REFERENCES azync_events (id) ON DELETE CASCADE,
     replay                boolean NOT NULL DEFAULT false,
@@ -92,7 +83,6 @@ CREATE TABLE azync_job_attempts (
     job_id    uuid NOT NULL REFERENCES azync_jobs (id) ON DELETE CASCADE,
     attempt   integer NOT NULL,
     error     text NOT NULL,
-    trace     text NULL,
     failed_at timestamptz NOT NULL DEFAULT now()
 );
 CREATE INDEX azync_job_attempts_job_idx ON azync_job_attempts (job_id, attempt);

@@ -3,15 +3,12 @@ package event
 import (
 	"context"
 	"testing"
-	"time"
 
 	"github.com/kausys/azync"
 	"github.com/kausys/azync/driver"
 	"github.com/kausys/azync/internal/drivertest"
 
-	"github.com/google/uuid"
 	"github.com/stretchr/testify/require"
-	"go.opentelemetry.io/otel/trace"
 )
 
 func TestRegisterValidatesAndResolvesMaxAttempts(t *testing.T) {
@@ -82,13 +79,12 @@ func TestPublishStampsPayloadAndOptions(t *testing.T) {
 	ctx := context.Background()
 
 	register(t, r, "billing", orderCreated{}.EventType(), 3)
-	tenant := uuid.New()
 	id, err := r.Publisher().Publish(ctx, orderCreated{Value: "hello"},
 		WithAggregate("order", "ord_9"),
 		WithVersion(7),
 		WithMeta("origin", "test"),
 		WithMeta("region", "eu"),
-		WithTenantID(tenant),
+		WithMeta("tenant_id", "ten_1"),
 	)
 	is.NoError(err)
 
@@ -99,66 +95,8 @@ func TestPublishStampsPayloadAndOptions(t *testing.T) {
 	is.Equal("order", view.AggregateType)
 	is.Equal("ord_9", view.AggregateID)
 	is.EqualValues(7, view.Version)
-	is.Equal(tenant, view.TenantID)
-	is.Equal(map[string]string{"origin": "test", "region": "eu"}, view.Meta)
+	is.Equal(map[string]string{"origin": "test", "region": "eu", "tenant_id": "ten_1"}, view.Meta)
 	is.JSONEq(`{"value":"hello"}`, string(view.Payload))
-}
-
-func TestPublishExplicitTraceWinsOverContext(t *testing.T) {
-	t.Parallel()
-	is := require.New(t)
-	f := drivertest.NewFake()
-	r := newTestRuntime(t, f)
-
-	// Ambient span context on ctx.
-	ctxTraceID := trace.TraceID{0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09, 0x0a, 0x0b, 0x0c, 0x0d, 0x0e, 0x0f, 0x10}
-	ctxSpanID := trace.SpanID{0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0xff, 0x11, 0x22}
-	ctx := trace.ContextWithSpanContext(context.Background(), trace.NewSpanContext(trace.SpanContextConfig{
-		TraceID: ctxTraceID, SpanID: ctxSpanID, TraceFlags: trace.FlagsSampled,
-	}))
-
-	register(t, r, "billing", orderCreated{}.EventType(), 3)
-
-	// Explicit WithTrace must override the ambient span context.
-	explicitTrace := "0f0e0d0c0b0a09080706050403020100"
-	explicitSpan := "2211ffeeddccbbaa"
-	id, err := r.Publisher().Publish(ctx, orderCreated{Value: "x"},
-		WithTrace(explicitTrace, explicitSpan, 0))
-	is.NoError(err)
-
-	// Lease the delivery to inspect the rehydrated ledger trace.
-	jobs, err := f.DequeueBatch(context.Background(), driver.SourceEvent,
-		driver.DequeueParams{Kind: "billing", Limit: 1, Lease: time.Minute})
-	is.NoError(err)
-	is.Len(jobs, 1)
-	is.Equal(id, jobs[0].EventID)
-	is.Equal(explicitTrace, jobs[0].Event.TraceID, "explicit WithTrace must win over TraceFromContext")
-	is.Equal(explicitSpan, jobs[0].Event.SpanID)
-}
-
-func TestPublishAppliesTraceFromContextWhenNoExplicit(t *testing.T) {
-	t.Parallel()
-	is := require.New(t)
-	f := drivertest.NewFake()
-	r := newTestRuntime(t, f)
-
-	traceID := trace.TraceID{0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09, 0x0a, 0x0b, 0x0c, 0x0d, 0x0e, 0x0f, 0x10}
-	spanID := trace.SpanID{0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0xff, 0x11, 0x22}
-	ctx := trace.ContextWithSpanContext(context.Background(), trace.NewSpanContext(trace.SpanContextConfig{
-		TraceID: traceID, SpanID: spanID, TraceFlags: trace.FlagsSampled,
-	}))
-
-	register(t, r, "billing", orderCreated{}.EventType(), 3)
-	_, err := r.Publisher().Publish(ctx, orderCreated{Value: "x"})
-	is.NoError(err)
-
-	jobs, err := f.DequeueBatch(context.Background(), driver.SourceEvent,
-		driver.DequeueParams{Kind: "billing", Limit: 1, Lease: time.Minute})
-	is.NoError(err)
-	is.Len(jobs, 1)
-	is.Equal(traceID.String(), jobs[0].Event.TraceID, "the ambient span must be stamped when no explicit trace is given")
-	is.Equal(spanID.String(), jobs[0].Event.SpanID)
-	is.Equal(int16(trace.FlagsSampled), jobs[0].Event.TraceFlags)
 }
 
 func TestPublishRequiresEventType(t *testing.T) {

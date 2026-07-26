@@ -10,11 +10,9 @@ import (
 	"github.com/kausys/azync/driver"
 
 	"github.com/google/uuid"
-	"go.opentelemetry.io/otel/trace"
 )
 
-// Producer enqueues jobs. The active trace is stamped automatically so the
-// consumer span at execution time joins the producer's trace.
+// Producer enqueues jobs.
 type Producer struct {
 	store              driver.Store
 	defaultMaxAttempts int
@@ -95,7 +93,7 @@ func (p *Producer) Enqueue(ctx context.Context, args JobArgs, opts ...EnqueueOpt
 	return EnqueueResult{ID: params.ID, Deduplicated: !inserted}, nil
 }
 
-func (p *Producer) makeParams(ctx context.Context, args JobArgs, opts ...EnqueueOption) (driver.EnqueueParams, error) {
+func (p *Producer) makeParams(_ context.Context, args JobArgs, opts ...EnqueueOption) (driver.EnqueueParams, error) {
 	o := enqueueOptions{maxRetries: p.defaultMaxAttempts}
 	for _, opt := range opts {
 		opt(&o)
@@ -106,7 +104,7 @@ func (p *Producer) makeParams(ctx context.Context, args JobArgs, opts ...Enqueue
 		return driver.EnqueueParams{}, fmt.Errorf("queue: marshal %s payload: %w", args.Kind(), err)
 	}
 
-	params := driver.EnqueueParams{
+	return driver.EnqueueParams{
 		ID:                  uuid.New(),
 		Kind:                args.Kind(),
 		Payload:             payload,
@@ -117,13 +115,7 @@ func (p *Producer) makeParams(ctx context.Context, args JobArgs, opts ...Enqueue
 		MaxAttemptsExplicit: o.maxRetriesExplicit,
 		IdempotencyKey:      o.idemKey,
 		IdempotencyTTL:      o.idemTTL,
-	}
-	if sc := trace.SpanContextFromContext(ctx); sc.IsValid() {
-		params.TraceID = sc.TraceID().String()
-		params.SpanID = sc.SpanID().String()
-		params.TraceFlags = int16(sc.TraceFlags())
-	}
-	return params, nil
+	}, nil
 }
 
 // TxProducerClient enqueues jobs inside the caller's own backend transaction,

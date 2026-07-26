@@ -11,11 +11,9 @@ import (
 	"github.com/kausys/azync/driver"
 
 	"github.com/google/uuid"
-	"go.opentelemetry.io/otel/trace"
 )
 
-// Client creates and signals dags. The active trace is stamped
-// automatically so the task spans at execution time join the creator's trace.
+// Client creates and signals dags.
 type Client struct {
 	store driver.DAGStore
 }
@@ -126,11 +124,6 @@ func (c *Client) makeParams(ctx context.Context, def *Definition, opts ...RunOpt
 		for _, dep := range t.after {
 			params.Deps = append(params.Deps, driver.DAGDep{TaskKey: t.key, DependsOnKey: dep})
 		}
-	}
-	if sc := trace.SpanContextFromContext(ctx); sc.IsValid() {
-		params.TraceID = sc.TraceID().String()
-		params.SpanID = sc.SpanID().String()
-		params.TraceFlags = int16(sc.TraceFlags())
 	}
 	return params, nil
 }

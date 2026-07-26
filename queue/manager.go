@@ -74,7 +74,6 @@ type JobView struct {
 	CompletedAt   time.Time
 	Payload       []byte
 	Meta          map[string]string
-	TraceID       string
 	LastError     string
 }
 
@@ -314,7 +313,6 @@ func toJobView(r driver.Job) JobView {
 		CompletedAt:   r.CompletedAt,
 		Payload:       r.Payload,
 		Meta:          r.Meta,
-		TraceID:       r.TraceID,
 		LastError:     r.LastError,
 	}
 }

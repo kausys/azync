@@ -21,7 +21,6 @@ type capturedDelivery struct {
 	value         string
 	id            uuid.UUID
 	typ           string
-	tenantID      uuid.UUID
 	aggregateType string
 	aggregateID   string
 	version       int64
@@ -36,7 +35,6 @@ func capture(ctx context.Context, evt orderCreated) capturedDelivery {
 		value:         evt.Value,
 		id:            EventID(ctx),
 		typ:           Type(ctx),
-		tenantID:      TenantID(ctx),
 		aggregateType: AggregateType(ctx),
 		aggregateID:   AggregateID(ctx),
 		version:       Version(ctx),

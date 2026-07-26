@@ -44,7 +44,6 @@ type eventDelivery struct {
 	amount        int
 	id            uuid.UUID
 	typ           string
-	tenantID      uuid.UUID
 	aggregateType string
 	aggregateID   string
 	version       int64
@@ -60,7 +59,6 @@ func captureEvent(ctx context.Context, e orderEvent) eventDelivery {
 		amount:        e.Amount,
 		id:            event.EventID(ctx),
 		typ:           event.Type(ctx),
-		tenantID:      event.TenantID(ctx),
 		aggregateType: event.AggregateType(ctx),
 		aggregateID:   event.AggregateID(ctx),
 		version:       event.Version(ctx),
@@ -88,12 +86,11 @@ func TestEventFanOutDeliversCompleteDelivery(t *testing.T) {
 	startWorker(t, e.Worker())
 	awaitEventReady(t, e)
 
-	tenant := uuid.New()
 	eventID, err := e.Publisher().Publish(ctx, orderEvent{Amount: 42},
-		event.WithTenantID(tenant),
 		event.WithAggregate("order", "order-99"),
 		event.WithVersion(7),
 		event.WithMeta("origin", "integration"),
+		event.WithMeta("tenant_id", "ten_it"),
 	)
 	is.NoError(err)
 
@@ -112,12 +109,11 @@ func TestEventFanOutDeliversCompleteDelivery(t *testing.T) {
 		is.Equal(42, d.amount, "the handler receives the decoded domain event")
 		is.Equal(eventID, d.id, "the delivery carries the ledger event id")
 		is.Equal(orderEvent{}.EventType(), d.typ)
-		is.Equal(tenant, d.tenantID)
 		is.Equal("order", d.aggregateType)
 		is.Equal("order-99", d.aggregateID)
 		is.Equal(int64(7), d.version)
 		is.False(d.occurredAt.IsZero())
-		is.Equal(map[string]string{"origin": "integration"}, d.meta)
+		is.Equal(map[string]string{"origin": "integration", "tenant_id": "ten_it"}, d.meta)
 		is.Equal(name, d.subscriber)
 		is.Equal(1, d.attempt)
 		is.False(d.replay)

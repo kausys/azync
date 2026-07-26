@@ -17,8 +17,8 @@ const replayLimitDefault = 1_000_000
 
 const publishEventSQL = `
 INSERT INTO azync_events
-	(id, type, tenant_id, aggregate_type, aggregate_id, version, occurred_at, payload, meta, trace_id, span_id, trace_flags)
-VALUES ($1, $2, $3, $4, $5, $6, $7, $8::jsonb, $9::jsonb, $10, $11, $12)`
+	(id, type, aggregate_type, aggregate_id, version, occurred_at, payload, meta)
+VALUES ($1, $2, $3, $4, $5, $6, $7::jsonb, $8::jsonb)`
 
 // publishDeliveriesSQL fans out one pending delivery per currently registered
 // matching subscriber. Deliveries carry an explicit per-subscriber budget
@@ -63,9 +63,8 @@ func (s *Store) publish(ctx context.Context, q querier, p driver.PublishParams) 
 		return 0, fmt.Errorf("azyncpgx: marshal event meta: %w", err)
 	}
 	if _, err := q.Exec(ctx, publishEventSQL,
-		p.ID, p.Type, nullableUUID(p.TenantID), p.AggregateType, p.AggregateID, p.Version, p.OccurredAt,
-		string(p.Payload), string(metaJSON), nullableString(p.TraceID), nullableString(p.SpanID),
-		nullableTraceFlags(p.TraceID, p.TraceFlags),
+		p.ID, p.Type, p.AggregateType, p.AggregateID, p.Version, p.OccurredAt,
+		string(p.Payload), string(metaJSON),
 	); err != nil {
 		return 0, fmt.Errorf("azyncpgx: append event: %w", err)
 	}

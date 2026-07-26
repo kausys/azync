@@ -33,10 +33,10 @@ import (
 
 const insertDAGSQL = `
 INSERT INTO azync_dags
-	(id, name, state, on_failure, idempotency_key, meta, trace_id, span_id, trace_flags, created_at, updated_at)
+	(id, name, state, on_failure, idempotency_key, meta, created_at, updated_at)
 VALUES ($1, $2, 'running',
 	CASE WHEN $3 = 'suspend' THEN 'suspend' ELSE 'cancel' END,
-	NULLIF($4, ''), $5::jsonb, NULLIF($6, ''), NULLIF($7, ''), $8, now(), now())
+	NULLIF($4, ''), $5::jsonb, now(), now())
 ON CONFLICT (name, idempotency_key)
 	WHERE idempotency_key IS NOT NULL AND state IN ('running', 'suspended', 'compensating')
 DO NOTHING
@@ -52,11 +52,11 @@ WHERE name = $1 AND idempotency_key = $2 AND state IN ('running', 'suspended', '
 const insertDAGTaskSQL = `
 INSERT INTO azync_jobs
 	(id, source, kind, state, run_at, max_attempts, max_attempts_explicit,
-	 payload, meta, trace_id, span_id, trace_flags, enqueued_at,
+	 payload, meta, enqueued_at,
 	 dag_id, task_key, compensation_kind, compensation_payload, signal_name, ignore_dead_deps)
 VALUES ($1, 'dag', $2, $3, now() + make_interval(secs => $4), $5, $6,
-	$7::jsonb, $8::jsonb, NULLIF($9, ''), NULLIF($10, ''), $11, now(),
-	$12, $13, NULLIF($14, ''), $15::jsonb, NULLIF($16, ''), $17)`
+	$7::jsonb, $8::jsonb, now(),
+	$9, $10, NULLIF($11, ''), $12::jsonb, NULLIF($13, ''), $14)`
 
 const insertDepSQL = `
 INSERT INTO azync_dag_deps (dag_id, task_key, depends_on_key) VALUES ($1, $2, $3)`
@@ -100,7 +100,6 @@ func (s *Store) createDAG(ctx context.Context, q querier, p driver.DAGParams) (b
 	var id pgtype.UUID
 	err = q.QueryRow(ctx, insertDAGSQL,
 		p.ID, p.Name, string(p.OnFailure), p.IdempotencyKey, string(metaJSON),
-		p.TraceID, p.SpanID, nullableTraceFlags(p.TraceID, p.TraceFlags),
 	).Scan(&id)
 	if errors.Is(err, pgx.ErrNoRows) {
 		// DO NOTHING fired: a live execution holds (Name, IdempotencyKey). This
@@ -146,7 +145,7 @@ func (s *Store) createDAG(ctx context.Context, q querier, p driver.DAGParams) (b
 
 		if _, err := q.Exec(ctx, insertDAGTaskSQL,
 			uuid.New(), tk.Kind, state, runAtOffsetSecs, tk.MaxAttempts, tk.MaxAttempts > 0,
-			payload, string(metaJSON), p.TraceID, p.SpanID, nullableTraceFlags(p.TraceID, p.TraceFlags),
+			payload, string(metaJSON),
 			p.ID, tk.Key, tk.CompensationKind, nullableRawJSON(tk.CompensationPayload),
 			tk.SignalName, tk.IgnoreDeadDeps,
 		); err != nil {
@@ -503,16 +502,16 @@ WHERE dag_id = $1 AND source = 'dag' AND state = 'succeeded'
 	AND task_key NOT LIKE 'comp:%'
 ORDER BY completed_at DESC, created_at DESC, id DESC`
 
-// insertCompensationTaskSQL clones the original succeeded task's meta, trace and
+// insertCompensationTaskSQL clones the original succeeded task's meta and
 // declared compensation payload into a fresh comp:<key> task of the declared
 // compensation kind. The compensation is itself uncompensated and signal-free.
 const insertCompensationTaskSQL = `
 INSERT INTO azync_jobs
 	(id, source, kind, state, run_at, max_attempts, max_attempts_explicit,
-	 payload, meta, trace_id, span_id, trace_flags, enqueued_at, dag_id, task_key)
+	 payload, meta, enqueued_at, dag_id, task_key)
 SELECT gen_random_uuid(), 'dag', o.compensation_kind, $3, now(),
 	o.max_attempts, o.max_attempts_explicit, o.compensation_payload, o.meta,
-	o.trace_id, o.span_id, o.trace_flags, now(), o.dag_id, $4
+	now(), o.dag_id, $4
 FROM azync_jobs o
 WHERE o.dag_id = $1 AND o.source = 'dag' AND o.task_key = $2`
 
@@ -774,7 +773,7 @@ func (s *Store) AckTaskResult(ctx context.Context, id, leaseToken uuid.UUID, res
 
 const dagColumns = `
 	id, name, state, on_failure, COALESCE(idempotency_key, ''), COALESCE(failure_reason, ''),
-	meta::text, COALESCE(trace_id, ''), created_at, updated_at, completed_at`
+	meta::text, created_at, updated_at, completed_at`
 
 const getDAGSQL = `SELECT ` + dagColumns + ` FROM azync_dags WHERE id = $1`
 
@@ -849,7 +848,7 @@ func scanDAGViews(rows pgx.Rows) ([]driver.DAGView, error) {
 		)
 		if err := rows.Scan(
 			&id, &view.Name, &state, &onFailure, &view.IdempotencyKey, &view.FailureReason,
-			&meta, &view.TraceID, &view.CreatedAt, &view.UpdatedAt, &completedAt,
+			&meta, &view.CreatedAt, &view.UpdatedAt, &completedAt,
 		); err != nil {
 			return nil, fmt.Errorf("azyncpgx: scan dag: %w", err)
 		}

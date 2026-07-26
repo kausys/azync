@@ -560,13 +560,12 @@ func runPublish(t *testing.T, store driver.Store) {
 		is := require.New(t)
 		is.NoError(store.RegisterSubscriber(ctx, driver.Subscriber{Name: "cmpl_s", EventType: "evt.complete", MaxAttempts: 3}))
 		occurred := time.Now().Truncate(time.Microsecond)
-		tenant := uuid.New()
 		eventID := uuid.New()
 		_, err := store.Publish(ctx, driver.PublishParams{
-			ID: eventID, Type: "evt.complete", TenantID: tenant,
+			ID: eventID, Type: "evt.complete",
 			AggregateType: "order", AggregateID: "agg-123", Version: 7,
 			OccurredAt: occurred, Payload: json.RawMessage(`{"k":"v"}`),
-			Meta: map[string]string{"m1": "v1"}, TraceID: "trace-abc", SpanID: "span-def", TraceFlags: 1,
+			Meta: map[string]string{"m1": "v1"},
 		})
 		is.NoError(err)
 
@@ -576,16 +575,12 @@ func runPublish(t *testing.T, store driver.Store) {
 		is.NotNil(rec, "the event is rehydrated on dequeue")
 		is.Equal(eventID, rec.ID)
 		is.Equal("evt.complete", rec.Type)
-		is.Equal(tenant, rec.TenantID)
 		is.Equal("order", rec.AggregateType)
 		is.Equal("agg-123", rec.AggregateID)
 		is.Equal(int64(7), rec.Version)
 		is.True(occurred.Equal(rec.OccurredAt), "OccurredAt round-trips")
 		is.JSONEq(`{"k":"v"}`, string(rec.Payload))
 		is.Equal(map[string]string{"m1": "v1"}, rec.Meta)
-		is.Equal("trace-abc", rec.TraceID)
-		is.Equal("span-def", rec.SpanID)
-		is.Equal(int16(1), rec.TraceFlags)
 	})
 
 	t.Run("rehydrated meta is never nil", func(t *testing.T) {
