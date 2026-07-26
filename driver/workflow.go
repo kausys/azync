@@ -148,7 +148,9 @@ type WorkflowStore interface {
 	VacuumWorkflows(ctx context.Context, retention time.Duration) (int64, error)
 
 	// ListStalledWorkflows returns up to limit running executions, updated
-	// more than olderThan ago, with no live (pending, scheduled, active or
+	// at least olderThan ago (inclusive, so olderThan 0 admits an execution
+	// updated in the same clock tick — coarse clocks would otherwise hide
+	// it), with no live (pending, scheduled, active or
 	// uncertain) source=workflow job tied to them by run_id — an execution
 	// that should be making progress but has nothing left to run it. This is
 	// defense-in-depth, not the primary correctness mechanism: StartWorkflow
