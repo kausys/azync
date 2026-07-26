@@ -738,14 +738,17 @@ func (s *Store) VacuumWorkflows(ctx context.Context, retention time.Duration) (i
 	return tag.RowsAffected(), nil
 }
 
-// listStalledWorkflowsSQL finds running executions whose last update is
-// older than the caller's grace window and that have no non-terminal
-// source=workflow job pointing at them. See driver.WorkflowStore's doc
-// comment for why this is a safety net, not the primary mechanism.
+// listStalledWorkflowsSQL finds running executions whose last update is at
+// least the caller's grace window old (inclusive <=, matching the fake and
+// the driver.WorkflowStore contract: at olderThan 0 an execution stamped in
+// the same clock tick as now() must still be visible) and that have no
+// non-terminal source=workflow job pointing at them. See
+// driver.WorkflowStore's doc comment for why this is a safety net, not the
+// primary mechanism.
 const listStalledWorkflowsSQL = `
 SELECT e.id, e.name FROM azync_workflow_executions e
 WHERE e.state = 'running'
-  AND e.updated_at < now() - make_interval(secs => $1)
+  AND e.updated_at <= now() - make_interval(secs => $1)
   AND NOT EXISTS (
     SELECT 1 FROM azync_jobs j
     WHERE j.run_id = e.id AND j.source = 'workflow'
@@ -755,7 +758,7 @@ ORDER BY e.updated_at
 LIMIT $2`
 
 // ListStalledWorkflows returns up to limit running executions with no live
-// task, updated more than olderThan ago.
+// task, updated at least olderThan ago.
 func (s *Store) ListStalledWorkflows(ctx context.Context, olderThan time.Duration, limit int) ([]driver.StalledWorkflow, error) {
 	if limit <= 0 {
 		limit = 100

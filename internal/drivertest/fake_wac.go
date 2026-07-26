@@ -548,8 +548,11 @@ func (f *Fake) WorkflowExecutionCount() int {
 }
 
 // ListStalledWorkflows returns up to limit running executions with no live
-// (pending, scheduled, active or uncertain) source=workflow job, updated
-// more than olderThan ago.
+// (pending, scheduled, active or uncertain) source=workflow job, updated at
+// least olderThan ago. The cutoff is inclusive (After, not !Before): on
+// coarse clocks (Windows ticks at up to ~15.6ms) an execution created and
+// checked within one tick has UpdatedAt == cutoff at olderThan 0, and a
+// strict comparison would hide a genuinely stranded execution.
 func (f *Fake) ListStalledWorkflows(_ context.Context, olderThan time.Duration, limit int) ([]driver.StalledWorkflow, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
@@ -559,7 +562,7 @@ func (f *Fake) ListStalledWorkflows(_ context.Context, olderThan time.Duration, 
 	cutoff := f.now().Add(-olderThan)
 	var out []driver.StalledWorkflow
 	for _, e := range f.executions {
-		if e.State != driver.WorkflowRunning || !e.UpdatedAt.Before(cutoff) {
+		if e.State != driver.WorkflowRunning || e.UpdatedAt.After(cutoff) {
 			continue
 		}
 		if f.hasLiveWorkflowJobLocked(e.ID) {
