@@ -28,10 +28,6 @@ import (
 // columns the contract does not expose.
 type fakeDAG struct {
 	driver.DAGView
-	// spanID and traceFlags complete the propagated trace stamped onto task
-	// jobs (the view exposes only TraceID).
-	spanID     string
-	traceFlags int16
 	// deps are the DAG edges, extended by the compensation chain when it is
 	// inserted.
 	deps []driver.DAGDep
@@ -99,13 +95,10 @@ func (f *Fake) CreateDAG(_ context.Context, p driver.DAGParams) (bool, uuid.UUID
 			OnFailure:      onFailure,
 			IdempotencyKey: p.IdempotencyKey,
 			Meta:           cloneMeta(p.Meta),
-			TraceID:        p.TraceID,
 			CreatedAt:      now,
 			UpdatedAt:      now,
 		},
-		spanID:     p.SpanID,
-		traceFlags: p.TraceFlags,
-		deps:       slices.Clone(p.Deps),
+		deps: slices.Clone(p.Deps),
 	}
 	f.dags[p.ID] = w
 
@@ -147,9 +140,6 @@ func (f *Fake) insertDAGTask(w *fakeDAG, tk driver.DAGTask, hasDeps bool, now ti
 			MaxAttempts:      tk.MaxAttempts,
 			Payload:          clonePayload(tk.Payload),
 			Meta:             cloneMeta(w.Meta),
-			TraceID:          w.TraceID,
-			SpanID:           w.spanID,
-			TraceFlags:       w.traceFlags,
 			RunAt:            runAt,
 			EnqueuedAt:       now,
 			DAGID:            w.ID,
@@ -438,9 +428,6 @@ func (f *Fake) insertCompensationsLocked(w *fakeDAG, now time.Time) int {
 				MaxAttempts: orig.MaxAttempts,
 				Payload:     clonePayload(orig.compensationPayload),
 				Meta:        cloneMeta(w.Meta),
-				TraceID:     w.TraceID,
-				SpanID:      w.spanID,
-				TraceFlags:  w.traceFlags,
 				RunAt:       now,
 				EnqueuedAt:  now,
 				DAGID:       w.ID,

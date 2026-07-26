@@ -10,7 +10,6 @@ import (
 	"github.com/kausys/azync/internal/drivertest"
 
 	"github.com/stretchr/testify/require"
-	"go.opentelemetry.io/otel/trace"
 )
 
 func TestEnqueueStampsDefaultsAndPayload(t *testing.T) {
@@ -116,27 +115,6 @@ func TestMaxRetriesExplicitSurvivesDivergentWorkerDefault(t *testing.T) {
 	is.NoError(err)
 	is.Len(jobs, 1)
 	is.Equal(2, jobs[0].MaxAttempts)
-}
-
-func TestEnqueueStampsActiveTrace(t *testing.T) {
-	t.Parallel()
-	is := require.New(t)
-	f := drivertest.NewFake()
-	r := newTestRuntime(t, f)
-
-	traceID := trace.TraceID{0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09, 0x0a, 0x0b, 0x0c, 0x0d, 0x0e, 0x0f, 0x10}
-	spanID := trace.SpanID{0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0xff, 0x11, 0x22}
-	ctx := trace.ContextWithSpanContext(context.Background(), trace.NewSpanContext(trace.SpanContextConfig{
-		TraceID: traceID, SpanID: spanID, TraceFlags: trace.FlagsSampled,
-	}))
-
-	res, err := r.Producer().Enqueue(ctx, testArgs{Value: "traced"})
-	is.NoError(err)
-
-	job := getJob(t, f, res.ID)
-	is.Equal(traceID.String(), job.TraceID)
-	is.Equal(spanID.String(), job.SpanID)
-	is.Equal(int16(trace.FlagsSampled), job.TraceFlags)
 }
 
 // txFake adds a trivial driver.TxStore[struct{}] over the fake so the positive

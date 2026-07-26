@@ -25,8 +25,6 @@ type Delivery struct {
 	ID uuid.UUID
 	// Type is the event type.
 	Type string
-	// TenantID scopes the event to a tenant; uuid.Nil means global/unset.
-	TenantID uuid.UUID
 	// AggregateType and AggregateID identify the source aggregate, if any.
 	AggregateType string
 	AggregateID   string
@@ -34,7 +32,8 @@ type Delivery struct {
 	Version int64
 	// OccurredAt is the domain time the event happened.
 	OccurredAt time.Time
-	// Meta carries the string-valued annotations attached at publish time.
+	// Meta carries the string-valued annotations attached at publish time
+	// (including any app-specific tenant / trace keys).
 	Meta map[string]string
 	// Subscriber is the name of the consumer this delivery targets.
 	Subscriber string
@@ -80,7 +79,6 @@ func deliveryFrom(job driver.Job) Delivery {
 	return Delivery{
 		ID:            e.ID,
 		Type:          e.Type,
-		TenantID:      e.TenantID,
 		AggregateType: e.AggregateType,
 		AggregateID:   e.AggregateID,
 		Version:       e.Version,
@@ -140,7 +138,3 @@ func AggregateID(ctx context.Context) string { return deliveryFromContext(ctx).A
 // Version is the aggregate version this event advanced to. Zero outside a
 // delivery.
 func Version(ctx context.Context) int64 { return deliveryFromContext(ctx).Version }
-
-// TenantID scopes the event to a tenant; uuid.Nil means global/unset or a
-// context outside a delivery.
-func TenantID(ctx context.Context) uuid.UUID { return deliveryFromContext(ctx).TenantID }

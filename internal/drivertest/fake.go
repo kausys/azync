@@ -163,12 +163,11 @@ func (j *fakeJob) toJob() driver.Job {
 	return out
 }
 
-func (f *Fake) recordAttempt(id uuid.UUID, attempt int, lastError, trace string, at time.Time) {
+func (f *Fake) recordAttempt(id uuid.UUID, attempt int, lastError string, at time.Time) {
 	f.attempts[id] = append(f.attempts[id], driver.AttemptError{
 		Attempt: attempt,
 		Error:   lastError,
 		At:      at,
-		Trace:   trace,
 	})
 }
 
@@ -248,9 +247,6 @@ func (f *Fake) enqueueLocked(p driver.EnqueueParams) (bool, error) {
 			MaxAttempts: p.MaxAttempts,
 			Payload:     clonePayload(p.Payload),
 			Meta:        cloneMeta(p.Meta),
-			TraceID:     p.TraceID,
-			SpanID:      p.SpanID,
-			TraceFlags:  p.TraceFlags,
 			RunAt:       runAt,
 			EnqueuedAt:  now,
 		},
@@ -277,16 +273,12 @@ func (f *Fake) publishLocked(p driver.PublishParams) (int, error) {
 	f.events[p.ID] = driver.EventRecord{
 		ID:            p.ID,
 		Type:          p.Type,
-		TenantID:      p.TenantID,
 		AggregateType: p.AggregateType,
 		AggregateID:   p.AggregateID,
 		Version:       p.Version,
 		OccurredAt:    p.OccurredAt,
 		Payload:       clonePayload(p.Payload),
 		Meta:          cloneMeta(p.Meta),
-		TraceID:       p.TraceID,
-		SpanID:        p.SpanID,
-		TraceFlags:    p.TraceFlags,
 	}
 	delivered := 0
 	for _, sub := range f.subscribersFor(p.Type) {
@@ -473,7 +465,7 @@ func (f *Fake) Reschedule(_ context.Context, id, leaseToken uuid.UUID, delay tim
 	j.LeaseUntil = time.Time{}
 	j.LastError = lastError
 	j.FailedAt = now
-	f.recordAttempt(j.ID, j.Attempt, lastError, j.TraceID, now)
+	f.recordAttempt(j.ID, j.Attempt, lastError, now)
 	f.bumpStat(j.Source, j.Kind, statFailed, 1, now)
 	return nil
 }
@@ -492,7 +484,7 @@ func (f *Fake) Dead(_ context.Context, id, leaseToken uuid.UUID, lastError strin
 	j.LeaseUntil = time.Time{}
 	j.LastError = lastError
 	j.FailedAt = now
-	f.recordAttempt(j.ID, j.Attempt, lastError, j.TraceID, now)
+	f.recordAttempt(j.ID, j.Attempt, lastError, now)
 	f.bumpStat(j.Source, j.Kind, statFailed, 1, now)
 	return nil
 }
@@ -592,7 +584,7 @@ func (f *Fake) ReapExpired(_ context.Context, source driver.Source, kinds []stri
 			j.State = driver.StateDead
 			j.LastError = "lease expired " + strconv.Itoa(j.ReapCount) + " times"
 			j.FailedAt = now
-			f.recordAttempt(j.ID, j.Attempt, j.LastError, j.TraceID, now)
+			f.recordAttempt(j.ID, j.Attempt, j.LastError, now)
 			killed++
 		} else {
 			j.State = driver.StatePending
@@ -1009,9 +1001,6 @@ func (f *Fake) eventMatches(e driver.EventRecord, filter driver.EventFilter) boo
 	if filter.Type != "" && e.Type != filter.Type {
 		return false
 	}
-	if filter.TenantID != uuid.Nil && e.TenantID != filter.TenantID {
-		return false
-	}
 	if !filter.Since.IsZero() && e.OccurredAt.Before(filter.Since) {
 		return false
 	}
@@ -1041,14 +1030,10 @@ func (f *Fake) eventAdminRow(e driver.EventRecord) driver.EventAdminRow {
 	row := driver.EventAdminRow{
 		ID:            e.ID,
 		Type:          e.Type,
-		TenantID:      e.TenantID,
 		AggregateType: e.AggregateType,
 		AggregateID:   e.AggregateID,
 		Version:       e.Version,
 		OccurredAt:    e.OccurredAt,
-		TraceID:       e.TraceID,
-		SpanID:        e.SpanID,
-		TraceFlags:    e.TraceFlags,
 		Meta:          cloneMeta(e.Meta),
 		Payload:       clonePayload(e.Payload),
 		Deliveries:    deliveries,

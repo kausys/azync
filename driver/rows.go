@@ -87,12 +87,6 @@ type EnqueueParams struct {
 	Payload json.RawMessage
 	// Meta carries string-valued annotations propagated to the handler.
 	Meta map[string]string
-	// TraceID, SpanID and TraceFlags carry an optional propagated trace. Flags
-	// are meaningful only when TraceID is set (flags 0 with a trace id is a
-	// valid unsampled trace).
-	TraceID    string
-	SpanID     string
-	TraceFlags int16
 	// RunAt is an absolute schedule (from At). Zero delegates to now()+Delay.
 	RunAt time.Time
 	// Delay is a relative schedule resolved against the backend clock; used only
@@ -125,8 +119,6 @@ type PublishParams struct {
 	ID uuid.UUID
 	// Type is the event type; subscribers registered for it receive a delivery.
 	Type string
-	// TenantID scopes the event to a tenant; uuid.Nil means global/unset.
-	TenantID uuid.UUID
 	// AggregateType and AggregateID identify the source aggregate, if any.
 	AggregateType string
 	AggregateID   string
@@ -138,10 +130,6 @@ type PublishParams struct {
 	Payload json.RawMessage
 	// Meta carries string-valued annotations.
 	Meta map[string]string
-	// TraceID, SpanID and TraceFlags carry an optional propagated trace.
-	TraceID    string
-	SpanID     string
-	TraceFlags int16
 }
 
 // DequeueParams controls a single DequeueBatch claim within one (Source, Kind)
@@ -189,10 +177,6 @@ type Job struct {
 	// Meta carries string-valued annotations. On reads it is never nil: a job
 	// with no annotations returns an empty (non-nil) map.
 	Meta map[string]string
-	// TraceID, SpanID and TraceFlags carry the propagated trace, if any.
-	TraceID    string
-	SpanID     string
-	TraceFlags int16
 	// RunAt is when the job becomes (or became) due.
 	RunAt time.Time
 	// LeaseUntil is the current lease deadline while State is StateActive.
@@ -245,7 +229,6 @@ type Job struct {
 type EventRecord struct {
 	ID            uuid.UUID
 	Type          string
-	TenantID      uuid.UUID
 	AggregateType string
 	AggregateID   string
 	Version       int64
@@ -253,10 +236,7 @@ type EventRecord struct {
 	Payload       json.RawMessage
 	// Meta carries string-valued annotations. On reads it is never nil: an event
 	// with no annotations returns an empty (non-nil) map.
-	Meta       map[string]string
-	TraceID    string
-	SpanID     string
-	TraceFlags int16
+	Meta map[string]string
 }
 
 // Subscriber is a registration binding a named consumer to an event type with
@@ -295,7 +275,6 @@ type AttemptError struct {
 	Attempt int
 	Error   string
 	At      time.Time
-	Trace   string
 }
 
 // JobFilter selects jobs for the admin list. A zero field means "no bound":
@@ -311,7 +290,6 @@ type JobFilter struct {
 // lack (true) any delivery.
 type EventFilter struct {
 	Type         string
-	TenantID     uuid.UUID
 	Undispatched *bool
 	Since        time.Time
 	Until        time.Time
@@ -351,7 +329,6 @@ type OpsStats struct {
 type EventAdminRow struct {
 	ID            uuid.UUID
 	Type          string
-	TenantID      uuid.UUID
 	AggregateType string
 	AggregateID   string
 	Version       int64
@@ -359,9 +336,6 @@ type EventAdminRow struct {
 	// DispatchedAt is zero when the event has no deliveries; otherwise it equals
 	// OccurredAt, since Publish creates deliveries atomically with the event.
 	DispatchedAt time.Time
-	TraceID      string
-	SpanID       string
-	TraceFlags   int16
 	Meta         map[string]string
 	Payload      json.RawMessage
 	// Deliveries is the number of delivery jobs fanned out from this event.

@@ -85,11 +85,6 @@ type DAGParams struct {
 	IdempotencyKey string
 	// Meta carries string-valued annotations, propagated onto every task job.
 	Meta map[string]string
-	// TraceID, SpanID and TraceFlags carry an optional propagated trace,
-	// stamped onto every task job.
-	TraceID    string
-	SpanID     string
-	TraceFlags int16
 	// Tasks is the static task set. Task keys must be unique within the
 	// workflow.
 	Tasks []DAGTask
@@ -153,8 +148,7 @@ type DAGView struct {
 	FailureReason string
 	// Meta carries string-valued annotations. On reads it is never nil: a
 	// workflow with no annotations returns an empty (non-nil) map.
-	Meta    map[string]string
-	TraceID string
+	Meta map[string]string
 	// CreatedAt and UpdatedAt are lifecycle timestamps; CompletedAt is zero
 	// until the workflow reaches a terminal state.
 	CreatedAt   time.Time

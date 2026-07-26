@@ -66,9 +66,7 @@ Subscriptions are durable and unique per `(subscriber name, event type)`. Prefer
 |--------|--------|
 | `event.WithAggregate(type, id)` | Aggregate coordinates on the ledger row |
 | `event.WithVersion(v)` | Event version |
-| `event.WithMeta(k, v)` | Opaque metadata |
-| `event.WithTenantID(id)` | Tenant tag |
-| `event.WithTrace(...)` | Trace fields (`TraceFromContext` is applied automatically; explicit wins) |
+| `event.WithMeta(k, v)` | Opaque metadata (use for tenant, trace ids, etc.) |
 
 ### Handler errors
 
@@ -82,7 +80,7 @@ Deliveries are at-least-once and **not ordered** across subscribers. Deduplicate
 
 ### Context accessors
 
-`EventID`, `Type`, `OccurredAt`, `SubscriberName`, `Attempt`, `MaxAttempts`, `IsRetry`, `IsReplay`, `AggregateType`, `AggregateID`, `Version`, `TenantID`, `Metadata`.
+`EventID`, `Type`, `OccurredAt`, `SubscriberName`, `Attempt`, `MaxAttempts`, `IsRetry`, `IsReplay`, `AggregateType`, `AggregateID`, `Version`, `Metadata`.
 
 ## Transactional publish
 

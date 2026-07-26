@@ -173,17 +173,15 @@ func TestNewContextExposesDeliveryToAccessors(t *testing.T) {
 	is := require.New(t)
 
 	id := uuid.New()
-	tenant := uuid.New()
 	occurred := time.Date(2026, 7, 23, 9, 0, 0, 0, time.UTC)
 	d := Delivery{
 		ID:            id,
 		Type:          "orders.created.v1",
-		TenantID:      tenant,
 		AggregateType: "order",
 		AggregateID:   "ord_1",
 		Version:       7,
 		OccurredAt:    occurred,
-		Meta:          map[string]string{"k": "v"},
+		Meta:          map[string]string{"k": "v", "tenant_id": "ten_1"},
 		Subscriber:    "billing",
 		Attempt:       2,
 		MaxAttempts:   5,
@@ -197,12 +195,11 @@ func TestNewContextExposesDeliveryToAccessors(t *testing.T) {
 
 	is.Equal(id, EventID(ctx))
 	is.Equal("orders.created.v1", Type(ctx))
-	is.Equal(tenant, TenantID(ctx))
 	is.Equal("order", AggregateType(ctx))
 	is.Equal("ord_1", AggregateID(ctx))
 	is.EqualValues(7, Version(ctx))
 	is.Equal(occurred, OccurredAt(ctx))
-	is.Equal(map[string]string{"k": "v"}, Metadata(ctx))
+	is.Equal(map[string]string{"k": "v", "tenant_id": "ten_1"}, Metadata(ctx))
 	is.Equal("billing", SubscriberName(ctx))
 	is.Equal(2, Attempt(ctx))
 	is.Equal(5, MaxAttempts(ctx))
@@ -220,7 +217,6 @@ func TestEventAccessorsAreZeroValueSafeOutsideADelivery(t *testing.T) {
 
 	is.Equal(uuid.Nil, EventID(ctx))
 	is.Empty(Type(ctx))
-	is.Equal(uuid.Nil, TenantID(ctx))
 	is.Empty(AggregateType(ctx))
 	is.Empty(AggregateID(ctx))
 	is.Zero(Version(ctx))

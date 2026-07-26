@@ -251,7 +251,7 @@ func (s *Store) GetJob(ctx context.Context, source driver.Source, id uuid.UUID) 
 }
 
 const jobAttemptsSQL = `
-SELECT a.attempt, a.error, a.failed_at, COALESCE(a.trace, '')
+SELECT a.attempt, a.error, a.failed_at
 FROM azync_job_attempts a JOIN azync_jobs j ON j.id = a.job_id
 WHERE a.job_id = $1 AND j.source = $2
 ORDER BY a.attempt, a.id`
@@ -266,7 +266,7 @@ func (s *Store) JobAttempts(ctx context.Context, source driver.Source, id uuid.U
 	var out []driver.AttemptError
 	for rows.Next() {
 		var a driver.AttemptError
-		if err := rows.Scan(&a.Attempt, &a.Error, &a.At, &a.Trace); err != nil {
+		if err := rows.Scan(&a.Attempt, &a.Error, &a.At); err != nil {
 			return nil, fmt.Errorf("azyncpgx: scan attempt: %w", err)
 		}
 		out = append(out, a)
@@ -409,8 +409,7 @@ func (s *Store) NukeAll(ctx context.Context, source driver.Source) (driver.NukeR
 // eventAdminColumns projects a ledger row plus its delivery count for the admin
 // views. Deliveries are the source='event' jobs linked by event_id.
 const eventAdminColumns = `
-	e.id, e.type, e.tenant_id, e.aggregate_type, e.aggregate_id, e.version, e.occurred_at,
-	COALESCE(e.trace_id, ''), COALESCE(e.span_id, ''), COALESCE(e.trace_flags, 0),
+	e.id, e.type, e.aggregate_type, e.aggregate_id, e.version, e.occurred_at,
 	e.meta::text, e.payload::text,
 	(SELECT COUNT(*) FROM azync_jobs j WHERE j.event_id = e.id AND j.source = 'event')`
 
@@ -472,9 +471,6 @@ func eventWhere(filter driver.EventFilter) (string, []any) {
 	if filter.Type != "" {
 		add("e.type =", filter.Type)
 	}
-	if filter.TenantID != uuid.Nil {
-		add("e.tenant_id =", filter.TenantID)
-	}
 	if !filter.Since.IsZero() {
 		add("e.occurred_at >=", filter.Since)
 	}
@@ -497,17 +493,16 @@ func scanEventAdminRows(rows pgx.Rows) ([]driver.EventAdminRow, error) {
 	for rows.Next() {
 		var (
 			row        driver.EventAdminRow
-			id, tenant pgtype.UUID
+			id         pgtype.UUID
 			meta, body string
 		)
 		if err := rows.Scan(
-			&id, &row.Type, &tenant, &row.AggregateType, &row.AggregateID, &row.Version, &row.OccurredAt,
-			&row.TraceID, &row.SpanID, &row.TraceFlags, &meta, &body, &row.Deliveries,
+			&id, &row.Type, &row.AggregateType, &row.AggregateID, &row.Version, &row.OccurredAt,
+			&meta, &body, &row.Deliveries,
 		); err != nil {
 			return nil, fmt.Errorf("azyncpgx: scan event: %w", err)
 		}
 		row.ID = toUUID(id)
-		row.TenantID = toUUID(tenant)
 		m, err := decodeMeta(meta)
 		if err != nil {
 			return nil, fmt.Errorf("azyncpgx: decode event meta for %s: %w", row.ID, err)

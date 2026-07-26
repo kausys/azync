@@ -78,12 +78,12 @@ RETURNING kind`
 const enqueueInsertSQL = `
 INSERT INTO azync_jobs
 	(id, source, kind, state, run_at, max_attempts, max_attempts_explicit, payload, meta,
-	 trace_id, span_id, trace_flags, idempotency_key, enqueued_at)
+	 idempotency_key, enqueued_at)
 SELECT $1, 'queue', $2,
 	CASE WHEN r.run_at > now() THEN 'scheduled' ELSE 'pending' END,
 	r.run_at, $3, $4, $5::jsonb, $6::jsonb,
-	NULLIF($7, ''), NULLIF($8, ''), $9, $10, now()
-FROM (SELECT COALESCE($11::timestamptz, now() + make_interval(secs => $12)) AS run_at) r
+	$7, now()
+FROM (SELECT COALESCE($8::timestamptz, now() + make_interval(secs => $9)) AS run_at) r
 ON CONFLICT (source, kind, idempotency_key)
 	WHERE idempotency_key IS NOT NULL AND state <> ALL (ARRAY['dead'::text, 'succeeded'::text])
 DO NOTHING
@@ -140,8 +140,7 @@ func (s *Store) enqueue(ctx context.Context, q querier, p driver.EnqueueParams) 
 	var id pgtype.UUID
 	err = q.QueryRow(ctx, enqueueInsertSQL,
 		p.ID, p.Kind, p.MaxAttempts, p.MaxAttemptsExplicit,
-		string(p.Payload), string(metaJSON),
-		p.TraceID, p.SpanID, nullableTraceFlags(p.TraceID, p.TraceFlags), idem,
+		string(p.Payload), string(metaJSON), idem,
 		nullableTime(p.RunAt), p.Delay.Seconds(),
 	).Scan(&id)
 	if errors.Is(err, pgx.ErrNoRows) {
@@ -289,11 +288,11 @@ WITH upd AS (
 		lease_until = NULL, lease_token = NULL,
 		last_error = $4, failed_at = now(), updated_at = now()
 	WHERE id = $1 AND state = 'active' AND lease_token = $2
-	RETURNING id, source, kind, attempt, trace_id
+	RETURNING id, source, kind, attempt
 ),
 ins AS (
-	INSERT INTO azync_job_attempts (job_id, attempt, error, trace)
-	SELECT id, attempt, $4, trace_id FROM upd
+	INSERT INTO azync_job_attempts (job_id, attempt, error)
+	SELECT id, attempt, $4 FROM upd
 )
 SELECT source, kind FROM upd`
 
@@ -308,11 +307,11 @@ WITH upd AS (
 		state = 'dead', lease_until = NULL, lease_token = NULL,
 		last_error = $3, failed_at = now(), updated_at = now()
 	WHERE id = $1 AND state = 'active' AND lease_token = $2
-	RETURNING id, source, kind, attempt, trace_id
+	RETURNING id, source, kind, attempt
 ),
 ins AS (
-	INSERT INTO azync_job_attempts (job_id, attempt, error, trace)
-	SELECT id, attempt, $3, trace_id FROM upd
+	INSERT INTO azync_job_attempts (job_id, attempt, error)
+	SELECT id, attempt, $3 FROM upd
 )
 SELECT source, kind FROM upd`
 
@@ -400,13 +399,12 @@ func (s *Store) requireRow(ctx context.Context, op, sql string, args ...any) err
 // ---- row scanning ---------------------------------------------------------
 
 // jobColumns is the projected column list for a job row under the given alias.
-// Nullable text/flag columns are COALESCE'd so scan targets stay simple; the
+// Nullable text columns are COALESCE'd so scan targets stay simple; the
 // nullable payload and timestamps keep their NULLs for pgtype scanning.
 func jobColumns(alias string) string {
 	a := alias + "."
 	return a + `id, ` + a + `source, ` + a + `kind, ` + a + `state, ` + a + `attempt, ` +
 		a + `max_attempts, ` + a + `reap_count, ` + a + `payload::text, ` + a + `meta::text, ` +
-		`COALESCE(` + a + `trace_id, ''), COALESCE(` + a + `span_id, ''), COALESCE(` + a + `trace_flags, 0), ` +
 		a + `run_at, ` + a + `lease_until, ` + a + `lease_token, COALESCE(` + a + `last_error, ''), ` +
 		a + `event_id, ` + a + `replay, ` + a + `enqueued_at, ` + a + `failed_at, ` + a + `completed_at, ` +
 		a + `dag_id, ` + a + `run_id, COALESCE(` + a + `task_key, ''), ` + a + `result::text, ` +
@@ -417,9 +415,8 @@ func jobColumns(alias string) string {
 // when a dequeue rehydrates an event delivery.
 func eventColumns(alias string) string {
 	a := alias + "."
-	return a + `type, ` + a + `tenant_id, ` + a + `aggregate_type, ` + a + `aggregate_id, ` +
-		a + `version, ` + a + `occurred_at, ` + a + `payload::text, ` + a + `meta::text, ` +
-		`COALESCE(` + a + `trace_id, ''), COALESCE(` + a + `span_id, ''), COALESCE(` + a + `trace_flags, 0)`
+	return a + `type, ` + a + `aggregate_type, ` + a + `aggregate_id, ` +
+		a + `version, ` + a + `occurred_at, ` + a + `payload::text, ` + a + `meta::text`
 }
 
 // scannedJob is the raw scan target for jobColumns. Nullable columns land as
@@ -434,9 +431,6 @@ type scannedJob struct {
 	reapCount   int
 	payload     *string
 	meta        string
-	traceID     string
-	spanID      string
-	traceFlags  int16
 	runAt       time.Time
 	leaseUntil  pgtype.Timestamptz
 	leaseToken  pgtype.UUID
@@ -459,22 +453,18 @@ type scannedJob struct {
 // scannedEvent is the raw scan target for eventColumns.
 type scannedEvent struct {
 	eventType     string
-	tenantID      pgtype.UUID
 	aggregateType string
 	aggregateID   string
 	version       int64
 	occurredAt    time.Time
 	payload       string
 	meta          string
-	traceID       string
-	spanID        string
-	traceFlags    int16
 }
 
 func (sj *scannedJob) scanArgs() []any {
 	return []any{
 		&sj.id, &sj.source, &sj.kind, &sj.state, &sj.attempt, &sj.maxAttempts, &sj.reapCount,
-		&sj.payload, &sj.meta, &sj.traceID, &sj.spanID, &sj.traceFlags, &sj.runAt, &sj.leaseUntil,
+		&sj.payload, &sj.meta, &sj.runAt, &sj.leaseUntil,
 		&sj.leaseToken, &sj.lastError, &sj.eventID, &sj.replay, &sj.enqueuedAt, &sj.failedAt, &sj.completedAt,
 		&sj.dagID, &sj.runID, &sj.taskKey, &sj.result, &sj.signalName, &sj.compensationKind, &sj.ignoreDeadDeps,
 	}
@@ -482,8 +472,8 @@ func (sj *scannedJob) scanArgs() []any {
 
 func (se *scannedEvent) scanArgs() []any {
 	return []any{
-		&se.eventType, &se.tenantID, &se.aggregateType, &se.aggregateID, &se.version,
-		&se.occurredAt, &se.payload, &se.meta, &se.traceID, &se.spanID, &se.traceFlags,
+		&se.eventType, &se.aggregateType, &se.aggregateID, &se.version,
+		&se.occurredAt, &se.payload, &se.meta,
 	}
 }
 
@@ -518,9 +508,6 @@ func (sj *scannedJob) toJob() (driver.Job, error) {
 		ReapCount:        sj.reapCount,
 		Payload:          payload,
 		Meta:             meta,
-		TraceID:          sj.traceID,
-		SpanID:           sj.spanID,
-		TraceFlags:       sj.traceFlags,
 		RunAt:            sj.runAt,
 		LeaseUntil:       sj.leaseUntil.Time,
 		LeaseToken:       toUUID(sj.leaseToken),
@@ -548,16 +535,12 @@ func (se *scannedEvent) toRecord(id uuid.UUID) (driver.EventRecord, error) {
 	return driver.EventRecord{
 		ID:            id,
 		Type:          se.eventType,
-		TenantID:      toUUID(se.tenantID),
 		AggregateType: se.aggregateType,
 		AggregateID:   se.aggregateID,
 		Version:       se.version,
 		OccurredAt:    se.occurredAt,
 		Payload:       json.RawMessage(se.payload),
 		Meta:          meta,
-		TraceID:       se.traceID,
-		SpanID:        se.spanID,
-		TraceFlags:    se.traceFlags,
 	}, nil
 }
 
@@ -620,23 +603,6 @@ func nullableTime(t time.Time) any {
 		return nil
 	}
 	return t
-}
-
-// nullableString maps an empty string to a SQL NULL argument.
-func nullableString(v string) any {
-	if v == "" {
-		return nil
-	}
-	return v
-}
-
-// nullableTraceFlags carries flags only alongside a trace id: flags 0 with a
-// trace id is a valid unsampled trace, so presence keys off the id.
-func nullableTraceFlags(traceID string, flags int16) any {
-	if traceID == "" {
-		return nil
-	}
-	return flags
 }
 
 func orEmptyMeta(m map[string]string) map[string]string {

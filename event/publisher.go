@@ -11,13 +11,11 @@ import (
 	"github.com/kausys/azync/driver"
 
 	"github.com/google/uuid"
-	"go.opentelemetry.io/otel/trace"
 )
 
 // Publisher appends events to the durable ledger and registers subscribers.
 // Publish atomically snapshots the subscribers matching an event and fans out
-// one delivery job per match; the active trace is stamped so the consumer span
-// at delivery time joins the publisher's trace.
+// one delivery job per match.
 type Publisher struct {
 	store              driver.Store
 	defaultMaxAttempts int
@@ -56,14 +54,11 @@ func (p *Publisher) Publish(ctx context.Context, args EventArgs, opts ...Publish
 	return params.ID, nil
 }
 
-func (p *Publisher) makeParams(ctx context.Context, args EventArgs, opts ...PublishOption) (driver.PublishParams, error) {
+func (p *Publisher) makeParams(_ context.Context, args EventArgs, opts ...PublishOption) (driver.PublishParams, error) {
 	if args == nil || args.EventType() == "" {
 		return driver.PublishParams{}, errors.New("event: event type is required")
 	}
-	// TraceFromContext is applied before the explicit options so an explicit
-	// WithTrace always wins over the ambient span context.
 	o := publishOptions{}
-	TraceFromContext(ctx)(&o)
 	for _, opt := range opts {
 		opt(&o)
 	}
@@ -74,16 +69,12 @@ func (p *Publisher) makeParams(ctx context.Context, args EventArgs, opts ...Publ
 	return driver.PublishParams{
 		ID:            uuid.New(),
 		Type:          args.EventType(),
-		TenantID:      o.tenantID,
 		AggregateType: o.aggregateType,
 		AggregateID:   o.aggregateID,
 		Version:       o.version,
 		OccurredAt:    time.Now().UTC(),
 		Payload:       payload,
 		Meta:          o.meta,
-		TraceID:       o.traceID,
-		SpanID:        o.spanID,
-		TraceFlags:    o.traceFlags,
 	}, nil
 }
 
@@ -92,10 +83,6 @@ type publishOptions struct {
 	aggregateID   string
 	version       int64
 	meta          map[string]string
-	tenantID      uuid.UUID
-	traceID       string
-	spanID        string
-	traceFlags    int16
 }
 
 // PublishOption customizes one Publish.
@@ -113,40 +100,15 @@ func WithVersion(version int64) PublishOption {
 	return func(o *publishOptions) { o.version = version }
 }
 
-// WithMeta attaches one metadata entry (repeatable).
+// WithMeta attaches one metadata entry (repeatable). Use meta for app-specific
+// fields such as tenant id or trace identifiers — azync does not model those
+// as first-class columns.
 func WithMeta(key, value string) PublishOption {
 	return func(o *publishOptions) {
 		if o.meta == nil {
 			o.meta = make(map[string]string)
 		}
 		o.meta[key] = value
-	}
-}
-
-// WithTenantID stamps a first-class tenant id on the event.
-func WithTenantID(id uuid.UUID) PublishOption {
-	return func(o *publishOptions) { o.tenantID = id }
-}
-
-// WithTrace stamps OpenTelemetry identifiers explicitly. It wins over the
-// ambient span context copied by TraceFromContext.
-func WithTrace(traceID, spanID string, flags int16) PublishOption {
-	return func(o *publishOptions) {
-		o.traceID, o.spanID, o.traceFlags = traceID, spanID, flags
-	}
-}
-
-// TraceFromContext copies a valid span context onto publish options. Publish
-// applies it before any explicit option, so an explicit WithTrace overrides it.
-func TraceFromContext(ctx context.Context) PublishOption {
-	return func(o *publishOptions) {
-		sc := trace.SpanContextFromContext(ctx)
-		if !sc.IsValid() {
-			return
-		}
-		o.traceID = sc.TraceID().String()
-		o.spanID = sc.SpanID().String()
-		o.traceFlags = int16(sc.TraceFlags())
 	}
 }
 

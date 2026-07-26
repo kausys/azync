@@ -19,13 +19,12 @@ import (
 
 const instrumentationName = "github.com/kausys/azync/internal/engine"
 
-// execute runs one leased job: consumer span joined to the enqueue trace,
-// per-job timeout, lease renewal, and outcome handling (Ack / Reschedule with
-// backoff / dead letter).
+// execute runs one leased job: consumer span, per-job timeout, lease renewal,
+// and outcome handling (Ack / Reschedule with backoff / dead letter).
 func (e *Engine) execute(jobsCtx context.Context, k Kind, job driver.Job, release func()) {
 	defer release()
 
-	ctx := withRemoteTrace(jobsCtx, job)
+	ctx := jobsCtx
 
 	tracer := otel.Tracer(instrumentationName)
 	ctx, span := tracer.Start(ctx, string(e.source)+".job "+job.Kind,
@@ -152,27 +151,4 @@ func (e *Engine) renewLease(ctx context.Context, id, leaseToken uuid.UUID, cance
 			}
 		}
 	}
-}
-
-// withRemoteTrace joins the handler context to the trace propagated at enqueue
-// time, if any.
-func withRemoteTrace(ctx context.Context, job driver.Job) context.Context {
-	if job.TraceID == "" || job.SpanID == "" {
-		return ctx
-	}
-	traceID, err := trace.TraceIDFromHex(job.TraceID)
-	if err != nil {
-		return ctx
-	}
-	spanID, err := trace.SpanIDFromHex(job.SpanID)
-	if err != nil {
-		return ctx
-	}
-	flags := trace.TraceFlags(job.TraceFlags) //nolint:gosec // stored from a uint8 to begin with
-	return trace.ContextWithRemoteSpanContext(ctx, trace.NewSpanContext(trace.SpanContextConfig{
-		TraceID:    traceID,
-		SpanID:     spanID,
-		TraceFlags: flags,
-		Remote:     true,
-	}))
 }

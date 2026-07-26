@@ -53,11 +53,11 @@ upd AS (
 	FROM e
 	WHERE j.id = e.id AND j.state = 'active'
 		AND j.lease_token IS NOT DISTINCT FROM e.lease_token
-	RETURNING j.id, j.kind, j.attempt, j.last_error, j.trace_id, (j.state = 'dead') AS died
+	RETURNING j.id, j.kind, j.attempt, j.last_error, (j.state = 'dead') AS died
 ),
 ins AS (
-	INSERT INTO azync_job_attempts (job_id, attempt, error, trace)
-	SELECT id, attempt, last_error, trace_id FROM upd WHERE died
+	INSERT INTO azync_job_attempts (job_id, attempt, error)
+	SELECT id, attempt, last_error FROM upd WHERE died
 )
 SELECT kind, died FROM upd`
 

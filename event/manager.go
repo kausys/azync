@@ -84,7 +84,6 @@ type ReplayReport struct {
 type EventView struct {
 	ID            uuid.UUID
 	Type          string
-	TenantID      uuid.UUID
 	AggregateType string
 	AggregateID   string
 	Version       int64
@@ -93,9 +92,6 @@ type EventView struct {
 	// OccurredAt — publish creates deliveries atomically, so "dispatched" means
 	// "has at least one delivery snapshot".
 	DispatchedAt time.Time
-	TraceID      string
-	SpanID       string
-	TraceFlags   int16
 	Meta         map[string]string
 	Payload      json.RawMessage
 }
@@ -324,15 +320,11 @@ func toEventView(row driver.EventAdminRow) EventView {
 	return EventView{
 		ID:            row.ID,
 		Type:          row.Type,
-		TenantID:      row.TenantID,
 		AggregateType: row.AggregateType,
 		AggregateID:   row.AggregateID,
 		Version:       row.Version,
 		OccurredAt:    row.OccurredAt,
 		DispatchedAt:  row.DispatchedAt,
-		TraceID:       row.TraceID,
-		SpanID:        row.SpanID,
-		TraceFlags:    row.TraceFlags,
 		Meta:          row.Meta,
 		Payload:       payload,
 	}
