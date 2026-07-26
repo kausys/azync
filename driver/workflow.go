@@ -146,4 +146,25 @@ type WorkflowStore interface {
 	// via FKs to history, signals, timers and azync_jobs linked by run_id.
 	// A retention <= 0 removes nothing.
 	VacuumWorkflows(ctx context.Context, retention time.Duration) (int64, error)
+
+	// ListStalledWorkflows returns up to limit running executions, updated
+	// more than olderThan ago, with no live (pending, scheduled, active or
+	// uncertain) source=workflow job tied to them by run_id — an execution
+	// that should be making progress but has nothing left to run it. This is
+	// defense-in-depth, not the primary correctness mechanism: StartWorkflow
+	// and SignalWorkflow already schedule their task atomically with their
+	// own effect, so a stall here means something outside that path (a
+	// row predating this guarantee, an operator deleting a job by hand, a
+	// driver bug) left an execution stranded. olderThan should be at least a
+	// few multiples of the worker's lease TTL, so a task that is merely
+	// between "scheduled" and "visible to this read" is never mistaken for
+	// stalled.
+	ListStalledWorkflows(ctx context.Context, olderThan time.Duration, limit int) ([]StalledWorkflow, error)
+}
+
+// StalledWorkflow identifies one execution ListStalledWorkflows found with no
+// live task to advance it.
+type StalledWorkflow struct {
+	ID   uuid.UUID
+	Name string
 }

@@ -17,6 +17,9 @@ CREATE TABLE azync_dags (
     -- that settles afterwards lands the workflow on cancelled instead of failed.
     cancel_requested boolean NOT NULL DEFAULT false,
     meta             jsonb NOT NULL DEFAULT '{}',
+    trace_id         text NULL,
+    span_id          text NULL,
+    trace_flags      smallint NULL,
     created_at       timestamptz NOT NULL DEFAULT now(),
     updated_at       timestamptz NOT NULL DEFAULT now(),
     completed_at     timestamptz NULL

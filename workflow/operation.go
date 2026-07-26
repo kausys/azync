@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"runtime/debug"
 	"time"
 
 	"github.com/kausys/azync/driver"
@@ -195,7 +196,7 @@ func (w *Worker) processOperationJob(ctx context.Context, job driver.Job) error 
 	defer close(hbDone)
 
 	started := time.Now()
-	result, runErr := fn(opCtx, body.Input)
+	result, runErr := w.runOperation(opCtx, fn, job, body)
 	timedOut := errors.Is(opCtx.Err(), context.DeadlineExceeded)
 	leaseLost := opCtx.Err() != nil && !timedOut && ctx.Err() == nil
 
@@ -258,6 +259,25 @@ func (w *Worker) processOperationJob(ctx context.Context, job driver.Job) error 
 		return err
 	}
 	return w.wakeWorkflow(ctx, body.WorkflowName, job.RunID)
+}
+
+// runOperation invokes the Operation handler with a panic guard, mirroring
+// internal/engine.runHandler: a panicking handler must take down only its
+// job, not the whole worker process. The recovered panic becomes an ordinary
+// error (stack attached) and flows through processOperationJob's normal
+// retry/uncertain/dead path exactly like any other handler error.
+//
+//nolint:nonamedreturns // the deferred recover must overwrite both returns
+func (w *Worker) runOperation(ctx context.Context, fn operationFunc, job driver.Job, body operationJobPayload) (result json.RawMessage, err error) {
+	defer func() {
+		if r := recover(); r != nil {
+			result = nil
+			err = fmt.Errorf("operation panic: %v\n%s", r, debug.Stack())
+			w.logger.Error("operation handler panicked",
+				"job", job.ID.String(), "name", body.Name, "version", body.Version, "panic", r)
+		}
+	}()
+	return fn(ctx, body.Input)
 }
 
 // renewOperationLease extends the Operation job lease every LeaseTTL/2 until

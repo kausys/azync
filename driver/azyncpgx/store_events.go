@@ -23,60 +23,80 @@ VALUES ($1, $2, $3, $4, $5, $6, $7::jsonb, $8::jsonb)`
 // publishDeliveriesSQL fans out one pending delivery per currently registered
 // matching subscriber. Deliveries carry an explicit per-subscriber budget
 // (max_attempts_explicit=true), so the first-lease default override never
-// touches them; payload is NULL because the body lives in the ledger.
+// touches them; payload is NULL because the body lives in the ledger. The
+// RETURNING feeds the post-commit notify: each distinct kind (subscriber
+// name) that actually received a delivery gets exactly one wakeup.
 const publishDeliveriesSQL = `
 INSERT INTO azync_jobs
 	(id, source, kind, state, run_at, max_attempts, max_attempts_explicit, event_id, replay, attempt, enqueued_at, meta, payload)
 SELECT gen_random_uuid(), 'event', s.name, 'pending', now(), s.max_attempts, true, $1, false, 0, now(), '{}', NULL
-FROM azync_subscribers s WHERE s.event_type = $2`
-
-// publishNotifySQL fires one wakeup per matching subscriber, inside the tx.
-const publishNotifySQL = `
-SELECT pg_notify($1, 'event:' || name) FROM azync_subscribers WHERE event_type = $2`
+FROM azync_subscribers s WHERE s.event_type = $2
+RETURNING kind`
 
 // Publish atomically appends one event and fans out one pending delivery per
-// matching subscriber in a single transaction.
+// matching subscriber in a single transaction. The wakeup notify fires
+// best-effort after commit (see notifyAfterCommit): wakeups are lossy by
+// contract, and firing pg_notify outside the transaction keeps a slow or
+// failing notify from ever aborting the publish.
 func (s *Store) Publish(ctx context.Context, p driver.PublishParams) (int, error) {
 	tx, err := s.pool.Begin(ctx)
 	if err != nil {
 		return 0, fmt.Errorf("azyncpgx: publish begin: %w", err)
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
-	delivered, err := s.publish(ctx, tx, p)
+	kinds, delivered, err := s.publish(ctx, tx, p)
 	if err != nil {
 		return 0, err
 	}
 	if err := tx.Commit(ctx); err != nil {
 		return 0, fmt.Errorf("azyncpgx: publish commit: %w", err)
 	}
+	for kind := range kinds {
+		s.notifyAfterCommit(driver.SourceEvent, kind) //nolint:contextcheck // deliberately independent of ctx, see notifyAfterCommit doc
+	}
 	return delivered, nil
 }
 
-// PublishTx performs Publish within the caller's transaction.
+// PublishTx performs Publish within the caller's transaction. The notify
+// stays inside the caller's transaction here — that is the outbox contract:
+// a wakeup is only ever sent if the caller's own transaction commits.
 func (s *Store) PublishTx(ctx context.Context, tx pgx.Tx, p driver.PublishParams) (int, error) {
-	return s.publish(ctx, tx, p)
+	kinds, delivered, err := s.publish(ctx, tx, p)
+	if err != nil {
+		return 0, err
+	}
+	for kind := range kinds {
+		if _, err := tx.Exec(ctx, `SELECT pg_notify($1, $2)`, s.notifyChannel, notifyPayload(driver.SourceEvent, kind)); err != nil {
+			return 0, fmt.Errorf("azyncpgx: publish notify: %w", err)
+		}
+	}
+	return delivered, nil
 }
 
-func (s *Store) publish(ctx context.Context, q querier, p driver.PublishParams) (int, error) {
+// publish inserts the ledger event and fans out deliveries, returning the
+// distinct set of subscriber kinds delivered to (for the caller to notify)
+// and the delivery count. It never notifies itself: Publish and PublishTx
+// notify on different sides of their commit.
+func (s *Store) publish(ctx context.Context, q querier, p driver.PublishParams) (map[string]struct{}, int, error) {
 	metaJSON, err := json.Marshal(orEmptyMeta(p.Meta))
 	if err != nil {
-		return 0, fmt.Errorf("azyncpgx: marshal event meta: %w", err)
+		return nil, 0, fmt.Errorf("azyncpgx: marshal event meta: %w", err)
 	}
 	if _, err := q.Exec(ctx, publishEventSQL,
 		p.ID, p.Type, p.AggregateType, p.AggregateID, p.Version, p.OccurredAt,
 		string(p.Payload), string(metaJSON),
 	); err != nil {
-		return 0, fmt.Errorf("azyncpgx: append event: %w", err)
+		return nil, 0, fmt.Errorf("azyncpgx: append event: %w", err)
 	}
-	tag, err := q.Exec(ctx, publishDeliveriesSQL, p.ID, p.Type)
+	rows, err := q.Query(ctx, publishDeliveriesSQL, p.ID, p.Type)
 	if err != nil {
-		return 0, fmt.Errorf("azyncpgx: create deliveries: %w", err)
+		return nil, 0, fmt.Errorf("azyncpgx: create deliveries: %w", err)
 	}
-	delivered := int(tag.RowsAffected())
-	if _, err := q.Exec(ctx, publishNotifySQL, s.notifyChannel, p.Type); err != nil {
-		return 0, fmt.Errorf("azyncpgx: publish notify: %w", err)
+	kinds, delivered, err := collectKinds(rows)
+	if err != nil {
+		return nil, 0, fmt.Errorf("azyncpgx: create deliveries scan: %w", err)
 	}
-	return delivered, nil
+	return kinds, int(delivered), nil
 }
 
 const registerSubscriberSQL = `
@@ -116,6 +136,19 @@ func (s *Store) Subscribers(ctx context.Context, eventType string) ([]driver.Sub
 	return out, nil
 }
 
+const deleteSubscriberSQL = `
+DELETE FROM azync_subscribers WHERE name = $1 AND ($2 = '' OR event_type = $2)`
+
+// DeleteSubscriber removes the (name, eventType) registration, or every
+// registration of name when eventType is empty.
+func (s *Store) DeleteSubscriber(ctx context.Context, name, eventType string) (int64, error) {
+	tag, err := s.pool.Exec(ctx, deleteSubscriberSQL, name, eventType)
+	if err != nil {
+		return 0, fmt.Errorf("azyncpgx: delete subscriber: %w", err)
+	}
+	return tag.RowsAffected(), nil
+}
+
 // replaySQL re-fans-out ledger events matching the filter into fresh deliveries
 // flagged replay=true, reconstructed from the ledger (the single source of
 // truth) so no original publish call is needed.
@@ -137,8 +170,9 @@ WHERE ($1 = '' OR sub.name = $1)
 RETURNING kind`
 
 // Replay re-fans-out ledger events matching filter into fresh pending
-// deliveries flagged Replay, and returns the number created. It wakes each
-// affected subscriber loop inside the transaction (outbox).
+// deliveries flagged Replay, and returns the number created. It owns its own
+// transaction (there is no ReplayTx / outbox variant), so its wakeups fire
+// best-effort after commit like Enqueue and Publish.
 func (s *Store) Replay(ctx context.Context, filter driver.ReplayFilter) (int64, error) {
 	limit := filter.Limit
 	if limit <= 0 {
@@ -160,13 +194,11 @@ func (s *Store) Replay(ctx context.Context, filter driver.ReplayFilter) (int64, 
 	if err != nil {
 		return 0, fmt.Errorf("azyncpgx: replay scan: %w", err)
 	}
-	for kind := range kinds {
-		if _, err := tx.Exec(ctx, `SELECT pg_notify($1, $2)`, s.notifyChannel, notifyPayload(driver.SourceEvent, kind)); err != nil {
-			return 0, fmt.Errorf("azyncpgx: replay notify: %w", err)
-		}
-	}
 	if err := tx.Commit(ctx); err != nil {
 		return 0, fmt.Errorf("azyncpgx: replay commit: %w", err)
+	}
+	for kind := range kinds {
+		s.notifyAfterCommit(driver.SourceEvent, kind) //nolint:contextcheck // deliberately independent of ctx, see notifyAfterCommit doc
 	}
 	return created, nil
 }

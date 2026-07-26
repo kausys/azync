@@ -18,7 +18,23 @@ const (
 	defaultOperationRetryDelay = time.Second
 	defaultRetention           = 30 * 24 * time.Hour
 	defaultVacuumInterval      = time.Hour
+	defaultReconcileInterval   = time.Minute
+	defaultConcurrency         = 1
+	defaultShutdownDrain       = 25 * time.Second
+	// stalledAfterLeaseMultiple sizes ListStalledWorkflows' olderThan window
+	// as a multiple of the lease TTL, so a task that is merely between
+	// "scheduled" and "visible to this read" — or a single missed lease
+	// renewal — is never mistaken for stalled.
+	stalledAfterLeaseMultiple = 5
 )
+
+// finalDrainGrace bounds the hard-stop wait after ShutdownDrain expires and
+// in-flight passes have been asked to stop via jobsCtx cancellation —
+// mirroring internal/engine's identical safety net (same rationale: a
+// handler ignoring cancellation must not hang Start forever). A var, not a
+// const, purely so tests in this package can shrink it; there is no public
+// knob for it.
+var finalDrainGrace = 10 * time.Second
 
 // WorkerMode selects which job kinds a Worker dequeues (spec §12).
 type WorkerMode string
@@ -95,6 +111,7 @@ func newRuntime(core *azync.Core, opts []Option, forOpen bool) (*Runtime, error)
 		cfg:        cfg,
 		workflows:  map[string]workflowFunc{},
 		operations: map[string]operationFunc{},
+		done:       make(chan struct{}),
 	}
 	r.manager = &Manager{store: store, jobs: core.Store()}
 	return r, nil
@@ -114,9 +131,16 @@ func (r *Runtime) Manager() *Manager { return r.manager }
 func (r *Runtime) Migrate(ctx context.Context) error { return r.core.Migrate(ctx) }
 
 // Close releases the runtime's resources: the private Core when the runtime
-// was built with Open, nothing when it composes over a shared Core.
+// was built with Open, nothing when it composes over a shared Core. When the
+// runtime owns its Core, Close first waits (bounded by ctx) for a running
+// Worker to finish draining, so the store is not closed out from under
+// in-flight settlements; on timeout it logs a warning and closes anyway
+// rather than hanging indefinitely.
 func (r *Runtime) Close(ctx context.Context) error {
 	if r.ownedCore {
+		if err := r.worker.Wait(ctx); err != nil {
+			r.core.Logger().Warn("workflow: Close: worker did not finish draining before ctx ended, closing store anyway", "error", err)
+		}
 		return r.core.Close(ctx)
 	}
 	return nil
@@ -135,6 +159,9 @@ type config struct {
 	workerMode          WorkerMode
 	retention           time.Duration
 	vacuumInterval      time.Duration
+	reconcileInterval   time.Duration
+	concurrency         int
+	shutdownDrain       time.Duration
 
 	coreOptions []azync.Option
 }
@@ -152,6 +179,9 @@ func resolveConfig(opts []Option, forOpen bool) (config, error) {
 		workerMode:          WorkerModeCombined,
 		retention:           defaultRetention,
 		vacuumInterval:      defaultVacuumInterval,
+		reconcileInterval:   defaultReconcileInterval,
+		concurrency:         defaultConcurrency,
+		shutdownDrain:       defaultShutdownDrain,
 	}
 	for _, opt := range opts {
 		if err := opt(&c); err != nil {
@@ -181,6 +211,24 @@ func WithFetchPollInterval(d time.Duration) Option {
 // and Operation jobs. Must be positive.
 func WithDefaultMaxRetries(n int) Option {
 	return positiveInt("WithDefaultMaxRetries", n, func(c *config) { c.defaultMaxAttempts = n })
+}
+
+// WithConcurrency sets how many workflow-task/Operation-task passes this
+// worker runs concurrently (default 1). Each pass still leases and processes
+// one job at a time (ProcessNext's Limit is always 1); this controls how
+// many such passes run in parallel across goroutines. Must be positive.
+func WithConcurrency(n int) Option {
+	return positiveInt("WithConcurrency", n, func(c *config) { c.concurrency = n })
+}
+
+// WithShutdownDrain overrides how long Start waits for in-flight
+// workflow-task/Operation passes on shutdown before cancelling their
+// context (default 25s, matching the core default). A pass past that budget
+// is cancelled but still given a final bounded grace period to finish
+// settling before Start gives up on it and returns anyway (see
+// internal/engine's identical drain shape). Must be positive.
+func WithShutdownDrain(d time.Duration) Option {
+	return positiveDuration("WithShutdownDrain", d, func(c *config) { c.shutdownDrain = d })
 }
 
 // WithOperationTimeout sets StartToClose for Operation handlers. Zero disables
@@ -229,6 +277,12 @@ func WithRetention(d time.Duration) Option {
 // withVacuumInterval shrinks the vacuum cadence. Test seam only.
 func withVacuumInterval(d time.Duration) Option {
 	return positiveDuration("withVacuumInterval", d, func(c *config) { c.vacuumInterval = d })
+}
+
+// withReconcileInterval shrinks the stalled-workflow reconciler's sweep
+// cadence. Test seam only.
+func withReconcileInterval(d time.Duration) Option {
+	return positiveDuration("withReconcileInterval", d, func(c *config) { c.reconcileInterval = d })
 }
 
 // WithCoreOptions forwards options to the Core that Open builds internally

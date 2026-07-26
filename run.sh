@@ -67,7 +67,7 @@ cmd_test() {
 }
 
 cmd_test_integration() {
-	local db_url="${AZYNC_INTEGRATION_DATABASE_URL:-postgres://azync:azync@localhost:5432/azync?sslmode=disable}"
+	local db_url="${AZYNC_INTEGRATION_DATABASE_URL:-postgres://azync:azync@localhost:5433/azync?sslmode=disable}"
 	echo "→ Integration testing driver/azyncpgx"
 	(cd driver/azyncpgx && AZYNC_INTEGRATION_DATABASE_URL="$db_url" go test ./...)
 }

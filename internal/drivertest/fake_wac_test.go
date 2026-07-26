@@ -109,11 +109,9 @@ func TestWorkflowAppendHistoryIsMonotonic(t *testing.T) {
 	f := newWACFake(t)
 	ctx := context.Background()
 
+	// StartWorkflow already records WorkflowStarted at seq 1 atomically.
 	id := startWorkflow(t, f, driver.WorkflowStartParams{Name: "wac-hist"})
 
-	seq1, err := f.AppendHistory(ctx, id, "WorkflowStarted", nil)
-	is.NoError(err)
-	is.Equal(int64(1), seq1)
 	seq2, err := f.AppendHistory(ctx, id, "OperationScheduled", json.RawMessage(`{"name":"op"}`))
 	is.NoError(err)
 	is.Equal(int64(2), seq2)

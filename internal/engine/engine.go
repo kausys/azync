@@ -66,6 +66,9 @@ type Settings struct {
 	StatsRetention time.Duration
 	// CompletedRetention bounds succeeded-job history; 0 retains forever.
 	CompletedRetention time.Duration
+	// DeadRetention bounds dead-job history; 0 retains forever (the default:
+	// dead jobs are never automatically removed unless an operator opts in).
+	DeadRetention time.Duration
 	// PromoteInterval overrides the scheduled->pending promotion cadence.
 	// Zero means the production default (1s).
 	PromoteInterval time.Duration
@@ -148,9 +151,14 @@ type Engine struct {
 	started   atomic.Bool
 	ready     chan struct{}
 	readyOnce sync.Once
+	done      chan struct{}
+	doneOnce  sync.Once
 
 	semGlobal sem
 	inflight  sync.WaitGroup
+	inflightN atomic.Int64
+
+	metrics *engineMetrics
 }
 
 // New builds an Engine from cfg. Kinds are registered afterwards with Register,
@@ -175,6 +183,8 @@ func New(cfg Config) *Engine {
 		acker:    acker,
 		kinds:    map[string]Kind{},
 		ready:    make(chan struct{}),
+		done:     make(chan struct{}),
+		metrics:  newEngineMetrics(cfg.Source),
 	}
 }
 
@@ -198,20 +208,56 @@ func (e *Engine) Register(k Kind) error {
 // Started reports whether Start has been called (and not failed during setup).
 func (e *Engine) Started() bool { return e.started.Load() }
 
-// Ready closes once wakeup setup succeeded and the loops are running. Poll-only
-// engines become ready immediately after Start.
+// Ready closes once wakeup setup succeeded and the loops are running (or once
+// Start has returned, on any error, so a caller blocked on Ready never hangs
+// past a failed Start). Poll-only engines become ready immediately after
+// Start. A retried Start after a failed setup reuses the same Engine, and
+// Ready is a one-shot gate: after the first Start attempt resolves, Ready is
+// permanently closed even across a later, successful retry. Callers pairing
+// Ready with Start should inspect Start's returned error.
 func (e *Engine) Ready() <-chan struct{} { return e.ready }
+
+// Done closes once Start has returned, for any reason. Calling Done before
+// Start has ever run returns a channel that never closes; check Started
+// first. Like Ready, Done is a one-shot gate tied to the first Start
+// invocation: if a Start that failed during setup is retried and later
+// succeeds, Done was already closed by the failed attempt and stays closed
+// while the retry is running. Done is meant for the common case (wait for
+// the one Start call to finish); a caller that retries Start after a setup
+// failure should not rely on Done to detect the retried call's completion.
+func (e *Engine) Done() <-chan struct{} { return e.done }
+
+func (e *Engine) resolveReady() { e.readyOnce.Do(func() { close(e.ready) }) }
+
+func (e *Engine) resolveDone() { e.doneOnce.Do(func() { close(e.done) }) }
+
+// finalDrainGrace bounds the second drain wait after in-flight handlers have
+// already been asked to cancel. A handler that ignores its context would
+// otherwise hang shutdown forever; past this grace period Start abandons the
+// wait and returns. The abandoned handlers are not lost: their lease expires
+// and the reaper recovers the jobs for another worker.
+//
+// A var, not a const, purely so tests in this package can shrink it; there is
+// no public knob (Settings has no field for it) — this is meant as a last
+// resort, not a tunable.
+var finalDrainGrace = 10 * time.Second
 
 // Start runs the engine until ctx is cancelled: one fetch loop per registered
 // kind (push wake + poll fallback) and the maintenance loop. On cancellation,
 // in-flight handlers drain for up to Settings.ShutdownDrain, then are
 // cancelled. Handlers run on a context derived from Background so they survive
-// the shutdown of ctx during the drain window.
+// the shutdown of ctx during the drain window. Start returns nil after a
+// graceful shutdown (ctx cancelled, drained or not); it returns a non-nil
+// error only for a setup failure (already started, no store, wake setup
+// failed).
 func (e *Engine) Start(ctx context.Context) error {
 	if e.store == nil {
+		e.resolveReady()
+		e.resolveDone()
 		return errors.New("engine has no store")
 	}
 	if !e.started.CompareAndSwap(false, true) {
+		e.resolveReady()
 		return errors.New("already started")
 	}
 
@@ -227,17 +273,19 @@ func (e *Engine) Start(ctx context.Context) error {
 	// jobsCtx outlives ctx by the drain budget so in-flight handlers finish.
 	jobsCtx, cancelJobs := context.WithCancel(context.Background())
 	defer cancelJobs()
+	defer e.resolveDone()
 
 	var wake <-chan driver.Wake
 	if notifier, ok := e.store.(driver.Notifier); ok {
 		ch, err := notifier.Wake(ctx)
 		if err != nil {
 			e.started.Store(false)
+			e.resolveReady()
 			return fmt.Errorf("wake: %w", err)
 		}
 		wake = ch
 	}
-	e.readyOnce.Do(func() { close(e.ready) })
+	e.resolveReady()
 
 	wakeChans := make(map[string]chan struct{}, len(names))
 	for _, name := range names {
@@ -277,13 +325,30 @@ func (e *Engine) Start(ctx context.Context) error {
 	go func() { e.inflight.Wait(); close(drained) }()
 	select {
 	case <-drained:
+		e.logger.Info("worker stopped", "source", string(e.source))
+		return nil
 	case <-time.After(e.settings.ShutdownDrain):
-		e.logger.Warn("drain budget exhausted, cancelling in-flight jobs")
-		cancelJobs()
-		e.inflight.Wait()
 	}
-	e.logger.Info("worker stopped", "source", string(e.source))
-	return ctx.Err()
+
+	e.logger.Warn("drain budget exhausted, cancelling in-flight jobs")
+	cancelJobs()
+	select {
+	case <-drained:
+		e.logger.Info("worker stopped", "source", string(e.source))
+	case <-time.After(finalDrainGrace):
+		// The abandoned handlers are leaked (drained's goroutine keeps waiting
+		// on e.inflight in the background), not killed: forcibly stopping a
+		// goroutine is not possible in Go, and their jobs recover via the
+		// lease reaper once the lease expires.
+		abandoned := e.inflightN.Load()
+		e.logger.Error("hard drain timeout exceeded, abandoning in-flight handlers",
+			"source", string(e.source), "abandoned", abandoned)
+		// ctx and jobsCtx are both already cancelled at this point; Background
+		// is the deliberate choice (the metrics API never checks cancellation).
+		//nolint:contextcheck // deliberate: see comment above
+		e.metrics.recordAbandoned(context.Background(), abandoned)
+	}
+	return nil
 }
 
 func (e *Engine) snapshotKinds() []Kind {

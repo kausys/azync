@@ -155,6 +155,47 @@ func TestManagerRetainSkipsInFlightTrimsTerminal(t *testing.T) {
 	is.Zero(stats.Events, "retention cascades the terminal deliveries and removes the event")
 }
 
+// TestManagerDeleteSubscriptionAndDrainUnblocksRetain proves that retiring a
+// subscriber (DeleteSubscription) alone does not free its abandoned pending
+// deliveries — Retain still skips their event — and that DrainSubscriber is
+// the explicit follow-up that clears them, after which Retain proceeds.
+func TestManagerDeleteSubscriptionAndDrainUnblocksRetain(t *testing.T) {
+	t.Parallel()
+	is := require.New(t)
+	f := drivertest.NewFake()
+	r := newTestRuntime(t, f)
+	ctx := context.Background()
+
+	register(t, r, "retiring_sub", orderCreated{}.EventType(), 3)
+	_, err := r.Publisher().Publish(ctx, orderCreated{Value: "x"})
+	is.NoError(err)
+
+	// The subscriber is retired, but its delivery is never leased (as if the
+	// process that used to run it is simply gone).
+	removed, err := r.Manager().DeleteSubscription(ctx, "retiring_sub", "")
+	is.NoError(err)
+	is.EqualValues(1, removed)
+
+	// The registration is gone...
+	subs, err := r.Manager().ListSubscribers(ctx, orderCreated{}.EventType())
+	is.NoError(err)
+	is.Empty(subs)
+
+	// ...but the abandoned pending delivery still blocks Retain.
+	deleted, err := r.Manager().Retain(ctx, time.Now().Add(time.Second), 10)
+	is.NoError(err)
+	is.Zero(deleted, "an abandoned pending delivery must still block retention")
+
+	// DrainSubscriber clears it explicitly.
+	drained, err := r.Manager().DrainSubscriber(ctx, "retiring_sub")
+	is.NoError(err)
+	is.EqualValues(1, drained)
+
+	deleted, err = r.Manager().Retain(ctx, time.Now().Add(time.Second), 10)
+	is.NoError(err)
+	is.EqualValues(1, deleted, "retention proceeds once the abandoned delivery is drained")
+}
+
 func TestManagerGetAndListEvents(t *testing.T) {
 	t.Parallel()
 	is := require.New(t)

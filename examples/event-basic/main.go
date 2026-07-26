@@ -26,7 +26,7 @@ import (
 // defaultDSN matches the repo's compose.yml; override with DATABASE_URL.
 //
 //nolint:gosec // not a credential leak: matches compose.yml's dev-only DB
-const defaultDSN = "postgres://azync:azync@localhost:5432/azync?sslmode=disable"
+const defaultDSN = "postgres://azync:azync@localhost:5433/azync?sslmode=disable"
 
 // userCreated is a typed event; EventType is the wire-stable identity.
 type userCreated struct {

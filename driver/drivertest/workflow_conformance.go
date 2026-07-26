@@ -28,10 +28,13 @@ func RunWorkflowConformance(t *testing.T, newStore func(t *testing.T) driver.Sto
 	t.Run("StartAndGet", func(t *testing.T) { runWACStartAndGet(t, ws) })
 	t.Run("StartDedupe", func(t *testing.T) { runWACStartDedupe(t, ws) })
 	t.Run("History", func(t *testing.T) { runWACHistory(t, ws) })
+	t.Run("HistoryOperationResultDedupe", func(t *testing.T) { runWACHistoryOperationResultDedupe(t, ws) })
 	t.Run("SignalDedupe", func(t *testing.T) { runWACSignalDedupe(t, ws) })
 	t.Run("Complete", func(t *testing.T) { runWACComplete(t, ws) })
 	t.Run("OperationUncertain", func(t *testing.T) { runWACOperationUncertain(t, store, ws) })
+	t.Run("ResolveUncertainFencing", func(t *testing.T) { runWACResolveUncertainFencing(t, store, ws) })
 	t.Run("Vacuum", func(t *testing.T) { runWACVacuum(t, store, ws) })
+	t.Run("ListStalledWorkflows", func(t *testing.T) { runWACListStalledWorkflows(t, store, ws) })
 }
 
 // ---- shared helpers -------------------------------------------------------
@@ -107,11 +110,10 @@ func runWACHistory(t *testing.T, ws driver.WorkflowStore) {
 	ctx := context.Background()
 	is := require.New(t)
 
+	// StartWorkflow already records WorkflowStarted at seq 1 atomically (see
+	// its doc comment), so this execution's history starts there.
 	id := startWAC(ctx, t, ws, driver.WorkflowStartParams{Name: "wfc_wac_hist"})
 
-	seq1, err := ws.AppendHistory(ctx, id, "WorkflowStarted", nil)
-	is.NoError(err)
-	is.Equal(int64(1), seq1)
 	seq2, err := ws.AppendHistory(ctx, id, "OperationScheduled", json.RawMessage(`{"name":"op"}`))
 	is.NoError(err)
 	is.Equal(int64(2), seq2)
@@ -132,6 +134,49 @@ func runWACHistory(t *testing.T, ws driver.WorkflowStore) {
 	is.True(driver.IsNotFound(err), "appending to a missing execution is not-found")
 	_, err = ws.ListHistory(ctx, uuid.New())
 	is.True(driver.IsNotFound(err))
+}
+
+// runWACHistoryOperationResultDedupe proves AppendHistory is idempotent for
+// an OperationCompleted/OperationFailed payload carrying an execution_key
+// already recorded: retrying the append (as a crash between the real
+// AppendHistory call and the operation job's Ack would cause) returns the
+// existing record's seq instead of creating a duplicate, which would
+// otherwise let a later replay misattribute that stray event's outcome to an
+// unrelated ExecuteOperation call.
+func runWACHistoryOperationResultDedupe(t *testing.T, ws driver.WorkflowStore) {
+	t.Helper()
+	ctx := context.Background()
+	is := require.New(t)
+
+	// StartWorkflow already records WorkflowStarted atomically; this test
+	// only needs the execution to exist.
+	id := startWAC(ctx, t, ws, driver.WorkflowStartParams{Name: "wfc_wac_hist_dedupe"})
+
+	payload := json.RawMessage(`{"name":"op","version":"1","execution_key":"exec-1","result":"first"}`)
+	seq1, err := ws.AppendHistory(ctx, id, "OperationCompleted", payload)
+	is.NoError(err)
+
+	// A retried append of the identical execution_key (simulating a crash
+	// between the original append and the job's Ack) must not duplicate.
+	seq2, err := ws.AppendHistory(ctx, id, "OperationCompleted", payload)
+	is.NoError(err)
+	is.Equal(seq1, seq2, "a retried append of the same execution_key must return the existing record")
+
+	events, err := ws.ListHistory(ctx, id)
+	is.NoError(err)
+	var completedCount int
+	for _, ev := range events {
+		if ev.Type == "OperationCompleted" {
+			completedCount++
+		}
+	}
+	is.Equal(1, completedCount, "exactly one OperationCompleted record must exist for the execution key")
+
+	// A different execution_key for the same type is a distinct record.
+	seq3, err := ws.AppendHistory(ctx, id, "OperationCompleted",
+		json.RawMessage(`{"name":"op","version":"1","execution_key":"exec-2","result":"second"}`))
+	is.NoError(err)
+	is.NotEqual(seq1, seq3)
 }
 
 // ---- SignalWorkflow dedupe --------------------------------------------------
@@ -275,6 +320,71 @@ func runWACOperationUncertain(t *testing.T, store driver.Store, ws driver.Workfl
 	is.Equal(driver.StateSucceeded, got.State)
 }
 
+// runWACResolveUncertainFencing proves ResolveUncertain is fenced to a job
+// that is still in StateUncertain: resolving a job twice, or a job that has
+// since moved on (retried, re-leased, and now active again), must return
+// NotFound rather than silently reapplying — or worse, clobbering a lease
+// another worker currently owns.
+func runWACResolveUncertainFencing(t *testing.T, store driver.Store, ws driver.WorkflowStore) {
+	t.Helper()
+	ctx := context.Background()
+	is := require.New(t)
+
+	scheduleAndMarkUncertain := func(name, kind string) uuid.UUID {
+		id := startWAC(ctx, t, ws, driver.WorkflowStartParams{Name: name})
+		jobID, err := ws.ScheduleOperation(ctx, driver.ScheduleOperationParams{
+			WorkflowID: id, Kind: kind, Payload: json.RawMessage(`{}`), MaxAttempts: 3,
+		})
+		is.NoError(err)
+		leased, err := store.DequeueBatch(ctx, driver.SourceWorkflow, driver.DequeueParams{
+			Kind: kind, Limit: 1, Lease: time.Minute, DefaultMaxAttempts: 3, OverrideDefault: true,
+		})
+		is.NoError(err)
+		is.Len(leased, 1)
+		is.NoError(ws.MarkUncertain(ctx, leased[0].ID, leased[0].LeaseToken, "ambiguous"))
+		return jobID
+	}
+
+	// Resolving an unknown job is not-found.
+	_, _, err := ws.ResolveUncertain(ctx, uuid.New(), string(driver.UncertainComplete), json.RawMessage(`{}`))
+	is.Error(err)
+	is.True(driver.IsNotFound(err))
+
+	// A second resolve, after the first already settled the job, must not
+	// reapply: the job is succeeded, not uncertain.
+	jobID := scheduleAndMarkUncertain("wfc_wac_resolve_twice", "$op:twice@1")
+	_, _, err = ws.ResolveUncertain(ctx, jobID, string(driver.UncertainComplete), json.RawMessage(`{"n":1}`))
+	is.NoError(err)
+	_, _, err = ws.ResolveUncertain(ctx, jobID, string(driver.UncertainComplete), json.RawMessage(`{"n":2}`))
+	is.Error(err, "resolving an already-settled job must fail")
+	is.True(driver.IsNotFound(err))
+	got, err := store.GetJob(ctx, driver.SourceWorkflow, jobID)
+	is.NoError(err)
+	is.Equal(driver.StateSucceeded, got.State)
+	is.JSONEq(`{"n":1}`, string(got.Result), "the second, rejected resolve must not overwrite the first result")
+
+	// A stale resolve arriving after the job was retried and re-leased (the
+	// TOCTOU window a load-then-update implementation would clobber) must
+	// fail instead of overwriting the live lease.
+	jobID = scheduleAndMarkUncertain("wfc_wac_resolve_stale", "$op:stale@1")
+	_, _, err = ws.ResolveUncertain(ctx, jobID, string(driver.UncertainRetry), nil)
+	is.NoError(err)
+	leased, err := store.DequeueBatch(ctx, driver.SourceWorkflow, driver.DequeueParams{
+		Kind: "$op:stale@1", Limit: 1, Lease: time.Minute, DefaultMaxAttempts: 3, OverrideDefault: true,
+	})
+	is.NoError(err)
+	is.Len(leased, 1, "the retried job must be leasable again")
+
+	_, _, err = ws.ResolveUncertain(ctx, jobID, string(driver.UncertainComplete), json.RawMessage(`{"stale":true}`))
+	is.Error(err, "a stale resolve against a re-leased, active job must fail")
+	is.True(driver.IsNotFound(err))
+
+	got, err = store.GetJob(ctx, driver.SourceWorkflow, jobID)
+	is.NoError(err)
+	is.Equal(driver.StateActive, got.State, "the live lease must survive the stale resolve untouched")
+	is.Equal(leased[0].LeaseToken, got.LeaseToken)
+}
+
 // ---- VacuumWorkflows + VacuumCompleted exemption ----------------------------
 
 func runWACVacuum(t *testing.T, store driver.Store, ws driver.WorkflowStore) {
@@ -282,10 +392,9 @@ func runWACVacuum(t *testing.T, store driver.Store, ws driver.WorkflowStore) {
 	ctx := context.Background()
 	is := require.New(t)
 
+	// StartWorkflow already records WorkflowStarted and schedules the first
+	// $wf:wfc_wac_vacuum task atomically.
 	id := startWAC(ctx, t, ws, driver.WorkflowStartParams{Name: "wfc_wac_vacuum"})
-	_, err := ws.AppendHistory(ctx, id, "WorkflowStarted", json.RawMessage(`{}`))
-	is.NoError(err)
-	is.NoError(ws.ScheduleTask(ctx, id, "$wf:wfc_wac_vacuum", time.Time{}))
 	is.NoError(ws.CompleteWorkflow(ctx, id, json.RawMessage(`{"ok":true}`)))
 
 	removed, err := ws.VacuumWorkflows(ctx, 0)
@@ -317,4 +426,53 @@ func runWACVacuum(t *testing.T, store driver.Store, ws driver.WorkflowStore) {
 
 	hist, err := ws.ListHistory(ctx, id)
 	is.True(driver.IsNotFound(err) || len(hist) == 0)
+}
+
+// ---- ListStalledWorkflows ---------------------------------------------------
+
+// runWACListStalledWorkflows proves ListStalledWorkflows finds a running
+// execution whose only task was removed out from under it (simulating an
+// operator deleting a job by hand, or any other way an execution ends up
+// stranded despite StartWorkflow's atomic guarantee) and ignores healthy
+// executions: one with a live task, and one not yet past olderThan.
+func runWACListStalledWorkflows(t *testing.T, store driver.Store, ws driver.WorkflowStore) {
+	t.Helper()
+	ctx := context.Background()
+	is := require.New(t)
+
+	// Healthy: StartWorkflow's own atomic task is still live.
+	startWAC(ctx, t, ws, driver.WorkflowStartParams{Name: "wfc_wac_stall_healthy"})
+
+	// Stalled: its only task is deleted out from under it.
+	startWAC(ctx, t, ws, driver.WorkflowStartParams{Name: "wfc_wac_stall_gone"})
+	jobs, _, err := store.ListJobs(ctx, driver.SourceWorkflow,
+		driver.JobFilter{Kind: "$wf:wfc_wac_stall_gone"}, 0, 10)
+	is.NoError(err)
+	is.Len(jobs, 1, "StartWorkflow must have scheduled exactly one task")
+	is.NoError(store.DeleteJob(ctx, driver.SourceWorkflow, jobs[0].ID, jobs[0].State))
+
+	// Not yet stalled long enough: same shape as the stalled one, but this
+	// test's olderThan window excludes it.
+	startWAC(ctx, t, ws, driver.WorkflowStartParams{Name: "wfc_wac_stall_recent"})
+	jobs, _, err = store.ListJobs(ctx, driver.SourceWorkflow,
+		driver.JobFilter{Kind: "$wf:wfc_wac_stall_recent"}, 0, 10)
+	is.NoError(err)
+	is.Len(jobs, 1)
+	is.NoError(store.DeleteJob(ctx, driver.SourceWorkflow, jobs[0].ID, jobs[0].State))
+
+	stalledList, err := ws.ListStalledWorkflows(ctx, 0, 100)
+	is.NoError(err)
+	names := make(map[string]bool, len(stalledList))
+	for _, sw := range stalledList {
+		names[sw.Name] = true
+	}
+	is.True(names["wfc_wac_stall_gone"], "an execution with no live task must be reported stalled")
+	is.False(names["wfc_wac_stall_healthy"], "an execution with a live task must not be reported stalled")
+
+	// A very long olderThan window excludes everything (nothing is that old).
+	none, err := ws.ListStalledWorkflows(ctx, 24*time.Hour, 100)
+	is.NoError(err)
+	for _, sw := range none {
+		is.NotEqual("wfc_wac_stall_gone", sw.Name, "olderThan must gate out a too-recent stall")
+	}
 }

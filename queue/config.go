@@ -148,6 +148,12 @@ func WithCompletedRetention(d time.Duration) Option {
 	return nonNegativeDuration("WithCompletedRetention", d, func(c *config) { c.CompletedRetention = d })
 }
 
+// WithDeadRetention overrides how long dead (exhausted-retry) jobs are kept.
+// A negative value is rejected; zero (the default) means retain forever.
+func WithDeadRetention(d time.Duration) Option {
+	return nonNegativeDuration("WithDeadRetention", d, func(c *config) { c.DeadRetention = d })
+}
+
 // WithCoreOptions forwards options to the Core that Open builds internally
 // (schema, logger, notify channel, shared defaults...). Valid only with Open;
 // New rejects it because the Core is already constructed.

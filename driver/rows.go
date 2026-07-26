@@ -255,6 +255,10 @@ type Depths struct {
 	Dead      int64
 	Paused    int64
 	Succeeded int64
+	// OldestPendingAge is how long the oldest currently-pending job has been
+	// waiting (now - its run_at, computed against the backend's own clock to
+	// avoid client/server skew). Zero when Pending is zero.
+	OldestPendingAge time.Duration
 }
 
 // DailyCount is one day of throughput counters for a kind, summed across the

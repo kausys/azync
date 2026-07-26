@@ -223,7 +223,7 @@ func TestShutdownDrainsInflightJob(t *testing.T) {
 		t.Fatal("job did not start")
 	}
 	err := stop()
-	is.ErrorIs(err, context.Canceled)
+	is.NoError(err, "Start returns nil after a graceful, drained shutdown")
 	is.False(canceled.Load(), "handler within the drain budget must not be cancelled")
 	is.Equal(driver.StateSucceeded, getJob(t, f, id).State,
 		"the drained job must settle even though the worker ctx ended")
@@ -256,7 +256,7 @@ func TestShutdownCancelsJobsPastDrainBudget(t *testing.T) {
 		t.Fatal("job did not start")
 	}
 	err := stop()
-	is.ErrorIs(err, context.Canceled)
+	is.NoError(err, "Start returns nil even after cancelling past the drain budget")
 	select {
 	case <-handlerCanceled:
 	case <-time.After(time.Second):
@@ -329,7 +329,110 @@ func TestStartCanRetryAfterWakeSetupFailure(t *testing.T) {
 
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
-	is.ErrorIs(e.Start(ctx), context.Canceled)
+	is.NoError(e.Start(ctx), "a retried Start that succeeds returns nil even given an already-cancelled ctx")
+}
+
+// TestReadyClosesOnWakeSetupFailure proves Ready unblocks even when Start
+// fails during wake setup, so a caller pairing `go Start(ctx); <-Ready()`
+// never hangs past a failed Start; it must inspect Start's error to learn the
+// attempt failed.
+func TestReadyClosesOnWakeSetupFailure(t *testing.T) {
+	t.Parallel()
+	is := require.New(t)
+	store := &wakeFailStore{Fake: drivertest.NewFake()}
+	e := New(Config{Store: store, Source: driver.SourceQueue, Logger: discardLogger(), Settings: testSettings()})
+
+	err := e.Start(context.Background())
+	is.Error(err)
+
+	select {
+	case <-e.Ready():
+	case <-time.After(time.Second):
+		t.Fatal("Ready did not close after a failed Start")
+	}
+}
+
+// TestDoneClosesAfterStartReturns proves Done unblocks exactly when Start has
+// returned, and stays open (Wait-style callers block) while Start is still
+// running.
+func TestDoneClosesAfterStartReturns(t *testing.T) {
+	t.Parallel()
+	is := require.New(t)
+	f := drivertest.NewFake()
+	e := newTestEngine(f, testSettings())
+
+	select {
+	case <-e.Done():
+		t.Fatal("Done closed before Start was even called")
+	default:
+	}
+
+	stop := startEngine(t, e)
+
+	select {
+	case <-e.Done():
+		t.Fatal("Done closed while Start is still running")
+	case <-time.After(50 * time.Millisecond):
+	}
+
+	is.NoError(stop())
+	select {
+	case <-e.Done():
+	case <-time.After(time.Second):
+		t.Fatal("Done did not close after Start returned")
+	}
+}
+
+// TestHardDrainTimeoutAbandonsStuckHandler proves that a handler which ignores
+// both its normal context AND the drain cancellation does not hang Start
+// forever: past finalDrainGrace, Start abandons the wait and returns nil. The
+// abandoned handler goroutine is intentionally leaked; its job recovers via
+// the lease reaper once the lease expires.
+func TestHardDrainTimeoutAbandonsStuckHandler(t *testing.T) {
+	// Deliberately not t.Parallel(): it mutates the package-level
+	// finalDrainGrace var, which every other test's Start call reads too.
+	// Running sequentially (before the parallel batch starts) avoids racing
+	// them on it.
+	is := require.New(t)
+
+	original := finalDrainGrace
+	finalDrainGrace = 50 * time.Millisecond
+	t.Cleanup(func() { finalDrainGrace = original })
+
+	f := drivertest.NewFake()
+	settings := testSettings()
+	settings.ShutdownDrain = 10 * time.Millisecond
+	e := newTestEngine(f, settings)
+
+	started := make(chan struct{}, 1)
+	stuck := make(chan struct{})
+	is.NoError(e.Register(Kind{Name: "stuck-forever", Concurrency: 1,
+		Handler: func(ctx context.Context, _ driver.Job) (json.RawMessage, error) {
+			started <- struct{}{}
+			<-stuck // never released: simulates a handler ignoring all cancellation
+			return nil, nil
+		}}))
+	t.Cleanup(func() { close(stuck) }) // release the leaked goroutine so the test process can exit cleanly
+
+	enqueue(t, f, "stuck-forever")
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { done <- e.Start(ctx) }()
+
+	select {
+	case <-started:
+	case <-time.After(2 * time.Second):
+		t.Fatal("job did not start")
+	}
+
+	cancel()
+	select {
+	case err := <-done:
+		is.NoError(err, "Start returns nil even after abandoning a stuck handler")
+	case <-time.After(2 * time.Second):
+		t.Fatal("Start did not return within the drain budget + hard grace period")
+	}
 }
 
 func TestRegisterDuplicateAndAfterStart(t *testing.T) {

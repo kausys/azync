@@ -28,7 +28,7 @@ go run ./workflow-kyc
 
 Each program migrates the schema on startup. `queue-basic`, `event-basic` and `shared-core` run until interrupted (Ctrl-C); `dag-basic` and `workflow-kyc` each drive one execution to completion and exit.
 
-By default every example connects to `postgres://azync:azync@localhost:5432/azync?sslmode=disable` (the compose default). Point at a different database with `DATABASE_URL`:
+By default every example connects to `postgres://azync:azync@localhost:5433/azync?sslmode=disable` (the compose default). Point at a different database with `DATABASE_URL`:
 
 ```sh
 DATABASE_URL="postgres://user:pass@host:5432/db?sslmode=disable" go run ./queue-basic

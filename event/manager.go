@@ -13,7 +13,8 @@ import (
 // Manager is the event administration surface: inspection, retry, replay,
 // retention and ops projections. Pure library — no auth, no HTTP; embed it
 // behind your own ops endpoints. It operates the event delivery source only and
-// deliberately has no pause, deletion or purge operations.
+// deliberately has no pause or purge operations beyond DeleteSubscription and
+// DrainSubscriber.
 type Manager struct {
 	store driver.Store
 }
@@ -236,6 +237,37 @@ func (m *Manager) OpsStats(ctx context.Context) (OpsStats, error) {
 // type.
 func (m *Manager) ListSubscribers(ctx context.Context, eventType string) ([]SubscriberView, error) {
 	return m.store.ListSubscriberViews(ctx, eventType)
+}
+
+// DeleteSubscription removes the (name, eventType) subscriber registration,
+// or every registration of name when eventType is empty, and returns the
+// number removed. Existing delivery jobs already fanned out are untouched —
+// they keep pinning the ledger events they belong to until they either
+// settle naturally or DrainSubscriber clears them. Deleting a subscription
+// that Worker.Start would otherwise re-create on the next deploy (because a
+// handler for it is still registered) only wins until that restart; remove
+// the registration in code too.
+func (m *Manager) DeleteSubscription(ctx context.Context, name, eventType string) (int64, error) {
+	return m.store.DeleteSubscriber(ctx, name, eventType)
+}
+
+// DrainSubscriber deletes every pending, scheduled and paused delivery job
+// for name and returns the count removed. This discards undelivered work —
+// call it only after DeleteSubscription, when you have decided those
+// deliveries will never be handled, typically to unblock Retain from a
+// retired subscriber's abandoned backlog (Retain skips any event with a
+// non-terminal delivery, so an undrained retired subscriber can pin its
+// events in the ledger forever).
+func (m *Manager) DrainSubscriber(ctx context.Context, name string) (int64, error) {
+	var total int64
+	for _, state := range []JobState{StatePending, StateScheduled, StatePaused} {
+		n, err := m.store.DeleteAll(ctx, driver.SourceEvent, name, state)
+		if err != nil {
+			return total, err
+		}
+		total += n
+	}
+	return total, nil
 }
 
 // ListDeliveries returns one page of deliveries (page is 0-based, default size

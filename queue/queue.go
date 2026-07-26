@@ -74,6 +74,7 @@ func newRuntime(core *azync.Core, opts []Option, forOpen bool) (*Runtime, error)
 			MaxReaps:           cfg.MaxReaps,
 			StatsRetention:     cfg.StatsRetention,
 			CompletedRetention: cfg.CompletedRetention,
+			DeadRetention:      cfg.DeadRetention,
 			PromoteInterval:    cfg.promoteInterval,
 			VacuumInterval:     cfg.vacuumInterval,
 		},
@@ -108,9 +109,16 @@ func (r *Runtime) Manager() *Manager { return r.manager }
 func (r *Runtime) Migrate(ctx context.Context) error { return r.core.Migrate(ctx) }
 
 // Close releases the runtime's resources: the private Core when the runtime
-// was built with Open, nothing when it composes over a shared Core.
+// was built with Open, nothing when it composes over a shared Core. When the
+// runtime owns its Core, Close first waits (bounded by ctx) for a running
+// Worker to finish draining, so the store is not closed out from under
+// in-flight settlements; on timeout it logs a warning and closes anyway
+// rather than hanging indefinitely.
 func (r *Runtime) Close(ctx context.Context) error {
 	if r.ownedCore {
+		if err := r.worker.Wait(ctx); err != nil {
+			r.core.Logger().Warn("queue: Close: worker did not finish draining before ctx ended, closing store anyway", "error", err)
+		}
 		return r.core.Close(ctx)
 	}
 	return nil

@@ -322,7 +322,7 @@ func TestShutdownDrainLetsSlowJobFinish(t *testing.T) {
 	case <-time.After(2 * time.Second):
 		t.Fatal("job did not start")
 	}
-	is.ErrorIs(stop(), context.Canceled)
+	is.NoError(stop(), "Start returns nil after a graceful, drained shutdown")
 	is.False(canceled.Load(), "a job inside the drain budget must complete, not be cancelled")
 	is.Equal(driver.StateSucceeded, getJob(t, f, res.ID).State)
 }

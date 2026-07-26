@@ -142,6 +142,55 @@ func TestMaintenanceVacuumCompletedHonorsRetention(t *testing.T) {
 	}, 2*time.Second, 2*time.Millisecond)
 }
 
+func TestMaintenanceVacuumDeadHonorsRetention(t *testing.T) {
+	t.Parallel()
+	is := require.New(t)
+	clk := drivertest.NewManualClock(time.Date(2026, 7, 22, 12, 0, 0, 0, time.UTC))
+	f := drivertest.NewFake()
+	f.Clock = clk
+	settings := fastMaintenanceSettings()
+	settings.DeadRetention = time.Hour
+	e := newTestEngine(f, settings)
+	ctx := context.Background()
+
+	job := leaseOne(t, f, "send", 5)
+	is.NoError(f.Dead(ctx, job.ID, job.LeaseToken, "boom"))
+
+	startMaintenance(t, e, []string{"send"})
+
+	// Within retention: the dead job is kept.
+	clk.Advance(30 * time.Minute)
+	time.Sleep(25 * time.Millisecond)
+	is.Equal(driver.StateDead, getJob(t, f, job.ID).State)
+
+	// Past retention: the dead row is trimmed.
+	clk.Advance(time.Hour)
+	is.Eventually(func() bool {
+		_, err := f.GetJob(ctx, driver.SourceQueue, job.ID)
+		return driver.IsNotFound(err)
+	}, 2*time.Second, 2*time.Millisecond)
+}
+
+func TestMaintenanceVacuumDeadZeroRetentionKeepsForever(t *testing.T) {
+	t.Parallel()
+	is := require.New(t)
+	clk := drivertest.NewManualClock(time.Date(2026, 7, 22, 12, 0, 0, 0, time.UTC))
+	f := drivertest.NewFake()
+	f.Clock = clk
+	settings := fastMaintenanceSettings()
+	settings.DeadRetention = 0 // default: retain forever
+	e := newTestEngine(f, settings)
+	ctx := context.Background()
+
+	job := leaseOne(t, f, "send", 5)
+	is.NoError(f.Dead(ctx, job.ID, job.LeaseToken, "boom"))
+
+	startMaintenance(t, e, []string{"send"})
+	clk.Advance(365 * 24 * time.Hour)
+	time.Sleep(30 * time.Millisecond) // several vacuum ticks
+	is.Equal(driver.StateDead, getJob(t, f, job.ID).State)
+}
+
 func TestMaintenanceVacuumCompletedZeroRetentionKeepsForever(t *testing.T) {
 	t.Parallel()
 	is := require.New(t)

@@ -126,6 +126,7 @@ func TestOptionValidation(t *testing.T) {
 		{"negative concurrency", azync.WithMaxConcurrency(-1)},
 		{"negative stats retention", azync.WithStatsRetention(-time.Hour)},
 		{"negative completed retention", azync.WithCompletedRetention(-time.Hour)},
+		{"negative dead retention", azync.WithDeadRetention(-time.Hour)},
 		{"empty schema", azync.WithSchema("")},
 		{"schema starting with digit", azync.WithSchema("1bad")},
 		{"schema with dash", azync.WithSchema("bad-name")},
@@ -145,10 +146,11 @@ func TestRetentionZeroMeansRetainForever(t *testing.T) {
 	t.Parallel()
 	is := require.New(t)
 	store := drivertest.NewFake()
-	core, err := azync.New(store, azync.WithCompletedRetention(0), azync.WithStatsRetention(0))
+	core, err := azync.New(store, azync.WithCompletedRetention(0), azync.WithStatsRetention(0), azync.WithDeadRetention(0))
 	is.NoError(err)
 	is.Equal(time.Duration(0), core.Defaults().CompletedRetention)
 	is.Equal(time.Duration(0), core.Defaults().StatsRetention)
+	is.Equal(time.Duration(0), core.Defaults().DeadRetention)
 }
 
 func TestDefaultsLayering(t *testing.T) {
@@ -172,6 +174,7 @@ func TestDefaultsLayering(t *testing.T) {
 	is.Equal(5, d.MaxReaps)
 	is.Equal(35*24*time.Hour, d.StatsRetention)
 	is.Equal(7*24*time.Hour, d.CompletedRetention)
+	is.Equal(time.Duration(0), d.DeadRetention, "dead jobs are retained forever unless an operator opts in")
 
 	// One override does not disturb the other defaults.
 	over, err := azync.New(store, azync.WithMaxReaps(9))

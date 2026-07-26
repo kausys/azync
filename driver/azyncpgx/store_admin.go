@@ -45,9 +45,18 @@ func (s *Store) ListKinds(ctx context.Context, source driver.Source) ([]string, 
 	return out, nil
 }
 
-const kindDepthsSQL = `SELECT kind, state, COUNT(*)::bigint FROM azync_jobs WHERE source = $1 GROUP BY kind, state`
+// kindDepthsSQL groups rows into (kind, state) buckets that are already
+// state-homogeneous, so MIN(run_at) needs no FILTER: it is simply the oldest
+// run_at within a bucket, meaningful only for the 'pending' bucket (NULL
+// otherwise is fine — addDepth only reads it there). Computed against now()
+// (the backend's own clock) so a skewed caller clock cannot misreport age.
+const kindDepthsSQL = `
+SELECT kind, state, COUNT(*)::bigint,
+	CASE WHEN state = 'pending' THEN EXTRACT(EPOCH FROM (now() - MIN(run_at))) END
+FROM azync_jobs WHERE source = $1 GROUP BY kind, state`
 
-// KindDepths returns per-kind instantaneous state counters of the source.
+// KindDepths returns per-kind instantaneous state counters of the source,
+// including the oldest pending job's age (see driver.Depths.OldestPendingAge).
 func (s *Store) KindDepths(ctx context.Context, source driver.Source) (map[string]driver.Depths, error) {
 	rows, err := s.pool.Query(ctx, kindDepthsSQL, string(source))
 	if err != nil {
@@ -57,14 +66,18 @@ func (s *Store) KindDepths(ctx context.Context, source driver.Source) (map[strin
 	out := map[string]driver.Depths{}
 	for rows.Next() {
 		var (
-			kind, state string
-			count       int64
+			kind, state    string
+			count          int64
+			pendingAgeSecs *float64
 		)
-		if err := rows.Scan(&kind, &state, &count); err != nil {
+		if err := rows.Scan(&kind, &state, &count, &pendingAgeSecs); err != nil {
 			return nil, fmt.Errorf("azyncpgx: scan kind depth: %w", err)
 		}
 		depths := out[kind]
 		addDepth(&depths, driver.JobState(state), count)
+		if pendingAgeSecs != nil {
+			depths.OldestPendingAge = secondsToDuration(*pendingAgeSecs)
+		}
 		out[kind] = depths
 	}
 	if err := rows.Err(); err != nil {
@@ -73,7 +86,16 @@ func (s *Store) KindDepths(ctx context.Context, source driver.Source) (map[strin
 	return out, nil
 }
 
-const statsDepthsSQL = `SELECT state, COUNT(*)::bigint FROM azync_jobs WHERE source = $1 AND kind = $2 GROUP BY state`
+// secondsToDuration converts a fractional-seconds float (as EXTRACT(EPOCH
+// FROM interval) returns) to a time.Duration.
+func secondsToDuration(secs float64) time.Duration {
+	return time.Duration(secs * float64(time.Second))
+}
+
+const statsDepthsSQL = `
+SELECT state, COUNT(*)::bigint,
+	CASE WHEN state = 'pending' THEN EXTRACT(EPOCH FROM (now() - MIN(run_at))) END
+FROM azync_jobs WHERE source = $1 AND kind = $2 GROUP BY state`
 
 const statsDailySQL = `
 SELECT day, SUM(enqueued)::bigint, SUM(processed)::bigint, SUM(failed)::bigint, SUM(reaped)::bigint
@@ -132,13 +154,17 @@ func scanDepths(rows pgx.Rows) (driver.Depths, error) {
 	var d driver.Depths
 	for rows.Next() {
 		var (
-			state string
-			count int64
+			state          string
+			count          int64
+			pendingAgeSecs *float64
 		)
-		if err := rows.Scan(&state, &count); err != nil {
+		if err := rows.Scan(&state, &count, &pendingAgeSecs); err != nil {
 			return driver.Depths{}, err
 		}
 		addDepth(&d, driver.JobState(state), count)
+		if pendingAgeSecs != nil {
+			d.OldestPendingAge = secondsToDuration(*pendingAgeSecs)
+		}
 	}
 	return d, rows.Err()
 }
@@ -232,6 +258,21 @@ func limitArg(limit int) any {
 	return limit
 }
 
+// kindClause appends kind to args and returns a " AND kind = $N" fragment
+// scoping to it, or returns "" (appending nothing) when kind is empty. This
+// replaces the ($N = ” OR kind = $N) pattern: that form defeats an index
+// with kind as a leading column, since planners generally cannot use an
+// index for an OR across two different columns' conditions the way they can
+// for a single equality predicate. The empty-kind case still needs no
+// predicate at all — "every kind" is simply the clause's absence.
+func kindClause(args *[]any, kind string) string {
+	if kind == "" {
+		return ""
+	}
+	*args = append(*args, kind)
+	return " AND kind = $" + strconv.Itoa(len(*args))
+}
+
 var getJobSQL = `SELECT ` + jobColumns("azync_jobs") + ` FROM azync_jobs WHERE id = $1 AND source = $2`
 
 // GetJob returns a single job of the source by id, or a not-found error.
@@ -290,20 +331,22 @@ func (s *Store) RetryJob(ctx context.Context, source driver.Source, id uuid.UUID
 	return s.requireRow(ctx, "retry", retryJobSQL, id, string(source))
 }
 
-const retryAllDeadSQL = `
+// RetryAllDead resets every dead job of (source, kind) to pending, looping in
+// maintenanceBatch-sized updates until a batch touches fewer than that many.
+// An empty kind targets all kinds of the source.
+func (s *Store) RetryAllDead(ctx context.Context, source driver.Source, kind string) (int64, error) {
+	args := make([]any, 0, 3)
+	args = append(args, string(source))
+	clause := kindClause(&args, kind)
+	args = append(args, s.maintenanceBatch)
+	sql := `
 UPDATE azync_jobs SET
 	state = 'pending', run_at = now(), attempt = 0, reap_count = 0,
 	last_error = NULL, failed_at = NULL, updated_at = now()
-WHERE source = $1 AND ($2 = '' OR kind = $2) AND state = 'dead'`
-
-// RetryAllDead resets every dead job of (source, kind) to pending. An empty kind
-// targets all kinds of the source.
-func (s *Store) RetryAllDead(ctx context.Context, source driver.Source, kind string) (int64, error) {
-	tag, err := s.pool.Exec(ctx, retryAllDeadSQL, string(source), kind)
-	if err != nil {
-		return 0, fmt.Errorf("azyncpgx: retry all dead: %w", err)
-	}
-	return tag.RowsAffected(), nil
+WHERE id IN (
+	SELECT id FROM azync_jobs WHERE source = $1` + clause + ` AND state = 'dead' LIMIT $` + strconv.Itoa(len(args)) + `
+)`
+	return s.execBatchLoop(ctx, "retry all dead", sql, args...)
 }
 
 const archiveJobSQL = `
@@ -343,30 +386,41 @@ func (s *Store) DeleteJob(ctx context.Context, source driver.Source, id uuid.UUI
 	return s.requireRow(ctx, "delete", deleteJobSQL, id, string(source), string(state))
 }
 
-const deleteAllSQL = `DELETE FROM azync_jobs WHERE source = $1 AND ($2 = '' OR kind = $2) AND state = $3`
-
-// DeleteAll deletes every job of (source, kind) in the given state and returns
-// the count. An empty kind targets all kinds of the source.
+// DeleteAll deletes every job of (source, kind) in the given state, looping
+// in maintenanceBatch-sized deletes until a batch removes fewer than that
+// many, and returns the total removed. An empty kind targets all kinds of
+// the source.
 func (s *Store) DeleteAll(ctx context.Context, source driver.Source, kind string, state driver.JobState) (int64, error) {
-	tag, err := s.pool.Exec(ctx, deleteAllSQL, string(source), kind, string(state))
-	if err != nil {
-		return 0, fmt.Errorf("azyncpgx: delete all: %w", err)
-	}
-	return tag.RowsAffected(), nil
+	args := make([]any, 0, 4)
+	args = append(args, string(source))
+	clause := kindClause(&args, kind)
+	args = append(args, string(state))
+	stateIdx := len(args)
+	args = append(args, s.maintenanceBatch)
+	sql := `DELETE FROM azync_jobs WHERE id IN (
+	SELECT id FROM azync_jobs WHERE source = $1` + clause + ` AND state = $` + strconv.Itoa(stateIdx) + `
+	LIMIT $` + strconv.Itoa(len(args)) + `
+)`
+	return s.execBatchLoop(ctx, "delete all", sql, args...)
 }
 
-const vacuumDeadSQL = `
-DELETE FROM azync_jobs
-WHERE source = $1 AND ($2 = '' OR kind = $2) AND state = 'dead' AND enqueued_at < now() - make_interval(secs => $3)`
-
-// VacuumDead deletes dead jobs of (source, kind) enqueued before olderThan ago
-// and returns the count. An empty kind targets all kinds of the source.
+// VacuumDead deletes dead jobs of (source, kind) enqueued before olderThan
+// ago, looping in maintenanceBatch-sized deletes until a batch removes fewer
+// than that many, and returns the total removed. An empty kind targets all
+// kinds of the source.
 func (s *Store) VacuumDead(ctx context.Context, source driver.Source, kind string, olderThan time.Duration) (int64, error) {
-	tag, err := s.pool.Exec(ctx, vacuumDeadSQL, string(source), kind, olderThan.Seconds())
-	if err != nil {
-		return 0, fmt.Errorf("azyncpgx: vacuum dead: %w", err)
-	}
-	return tag.RowsAffected(), nil
+	args := make([]any, 0, 4)
+	args = append(args, string(source))
+	clause := kindClause(&args, kind)
+	args = append(args, olderThan.Seconds())
+	olderThanIdx := len(args)
+	args = append(args, s.maintenanceBatch)
+	sql := `DELETE FROM azync_jobs WHERE id IN (
+	SELECT id FROM azync_jobs
+	WHERE source = $1` + clause + ` AND state = 'dead' AND enqueued_at < now() - make_interval(secs => $` + strconv.Itoa(olderThanIdx) + `)
+	LIMIT $` + strconv.Itoa(len(args)) + `
+)`
+	return s.execBatchLoop(ctx, "vacuum dead", sql, args...)
 }
 
 // NukeAll deletes all jobs, stats and idempotency keys of the source (a dev

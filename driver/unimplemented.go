@@ -38,6 +38,11 @@ func (UnimplementedStore) Subscribers(context.Context, string) ([]Subscriber, er
 	return nil, ErrNotSupported
 }
 
+// DeleteSubscriber reports ErrNotSupported.
+func (UnimplementedStore) DeleteSubscriber(context.Context, string, string) (int64, error) {
+	return 0, ErrNotSupported
+}
+
 // DequeueBatch reports ErrNotSupported.
 func (UnimplementedStore) DequeueBatch(context.Context, Source, DequeueParams) ([]Job, error) {
 	return nil, ErrNotSupported

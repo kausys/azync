@@ -10,6 +10,7 @@ import (
 	"github.com/kausys/azync/internal/drivertest"
 
 	"github.com/stretchr/testify/require"
+	"go.opentelemetry.io/otel/trace"
 )
 
 func TestEnqueueStampsDefaultsAndPayload(t *testing.T) {
@@ -94,6 +95,48 @@ func TestMetaIsStored(t *testing.T) {
 
 	job := getJob(t, f, res.ID)
 	is.Equal(map[string]string{"tenant": "t1", "origin": "test"}, job.Meta)
+}
+
+// withValidSpanContext returns ctx carrying a valid, sampled span context
+// built directly from the W3C spec's example trace/span IDs — no SDK
+// TracerProvider needed, just the otel/trace API.
+func withValidSpanContext(ctx context.Context) context.Context {
+	traceID, _ := trace.TraceIDFromHex("4bf92f3577b34da6a3ce929d0e0e4736")
+	spanID, _ := trace.SpanIDFromHex("00f067aa0ba902b7")
+	sc := trace.NewSpanContext(trace.SpanContextConfig{
+		TraceID:    traceID,
+		SpanID:     spanID,
+		TraceFlags: trace.FlagsSampled,
+	})
+	return trace.ContextWithSpanContext(ctx, sc)
+}
+
+func TestEnqueueInjectsTraceparentWhenCtxCarriesASpan(t *testing.T) {
+	t.Parallel()
+	is := require.New(t)
+	f := drivertest.NewFake()
+	r := newTestRuntime(t, f)
+
+	ctx := withValidSpanContext(context.Background())
+	res, err := r.Producer().Enqueue(ctx, testArgs{Value: "x"})
+	is.NoError(err)
+
+	job := getJob(t, f, res.ID)
+	is.Contains(job.Meta, "traceparent")
+	is.Contains(job.Meta["traceparent"], "4bf92f3577b34da6a3ce929d0e0e4736")
+}
+
+func TestEnqueueOmitsTraceparentWithoutASpan(t *testing.T) {
+	t.Parallel()
+	is := require.New(t)
+	f := drivertest.NewFake()
+	r := newTestRuntime(t, f)
+
+	res, err := r.Producer().Enqueue(context.Background(), testArgs{Value: "x"})
+	is.NoError(err)
+
+	job := getJob(t, f, res.ID)
+	is.NotContains(job.Meta, "traceparent")
 }
 
 func TestMaxRetriesExplicitSurvivesDivergentWorkerDefault(t *testing.T) {

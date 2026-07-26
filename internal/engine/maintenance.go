@@ -30,11 +30,23 @@ func (e *Engine) maintenanceLoop(ctx context.Context, kinds []string) {
 	defer reap.Stop()
 	vacuum := time.NewTicker(vacuumInterval)
 	defer vacuum.Stop()
+	metricsTick := time.NewTicker(metricsDepthInterval)
+	defer metricsTick.Stop()
 
 	for {
 		select {
 		case <-ctx.Done():
 			return
+
+		case <-metricsTick.C:
+			// Feeds the queue.depth / queue.oldest_pending_age gauge callback
+			// (engineMetrics.updateDepths): the callback itself must never
+			// touch the database, so this ticker is the only thing that does.
+			if depths, err := e.store.KindDepths(ctx, e.source); err != nil && ctx.Err() == nil {
+				e.logger.Error("metrics depth refresh failed", "error", err)
+			} else if err == nil {
+				e.metrics.updateDepths(depths)
+			}
 
 		case <-promote.C:
 			if _, err := e.store.PromoteDue(ctx, e.source, kinds); err != nil && ctx.Err() == nil {
@@ -59,6 +71,16 @@ func (e *Engine) maintenanceLoop(ctx context.Context, kinds []string) {
 			}
 			if _, err := e.store.VacuumCompleted(ctx, e.source, e.settings.CompletedRetention); err != nil && ctx.Err() == nil {
 				e.logger.Error("completed vacuum failed", "error", err)
+			}
+			// Unlike VacuumCompleted/VacuumStats, VacuumDead has no built-in
+			// "<= 0 retains forever" guard (an olderThan of 0 would vacuum
+			// every dead job immediately), so that default is enforced here:
+			// DeadRetention's zero value keeps today's behavior (dead jobs
+			// are never automatically removed) until an operator opts in.
+			if e.settings.DeadRetention > 0 {
+				if _, err := e.store.VacuumDead(ctx, e.source, "", e.settings.DeadRetention); err != nil && ctx.Err() == nil {
+					e.logger.Error("dead vacuum failed", "error", err)
+				}
 			}
 		}
 	}

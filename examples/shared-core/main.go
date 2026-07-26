@@ -29,7 +29,7 @@ import (
 )
 
 //nolint:gosec // matches compose.yml's dev-only DB
-const defaultDSN = "postgres://azync:azync@localhost:5432/azync?sslmode=disable"
+const defaultDSN = "postgres://azync:azync@localhost:5433/azync?sslmode=disable"
 
 type orderPlaced struct {
 	OrderID string `json:"orderId"`
