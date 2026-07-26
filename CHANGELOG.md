@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.0.5](https://github.com/kausys/azync/compare/v0.0.4...v0.0.5) (2026-07-26)
+
+
+### Bug Fixes
+
+* make ListStalledWorkflows' olderThan cutoff inclusive ([765ba0e](https://github.com/kausys/azync/commit/765ba0e4fe2d1420e87e702c01328a6b9e438eab))
+
 ## [0.0.4](https://github.com/kausys/azync/compare/v0.0.3...v0.0.4) (2026-07-26)
 
 
