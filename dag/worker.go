@@ -27,6 +27,23 @@ type Worker struct {
 // Polling-only workers become ready immediately after Start.
 func (w *Worker) Ready() <-chan struct{} { return w.engine.Ready() }
 
+// Wait blocks until a Start call has returned, or ctx ends first, whichever
+// comes first. If Start was never called, Wait returns immediately (there is
+// nothing to wait for). Close uses Wait to avoid closing a shared store out
+// from under an in-flight drain; callers coordinating their own shutdown
+// (stop ctx, then Wait, then release other resources) should do the same.
+func (w *Worker) Wait(ctx context.Context) error {
+	if !w.engine.Started() {
+		return nil
+	}
+	select {
+	case <-w.engine.Done():
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+}
+
 // Start runs the worker until ctx is cancelled: the shared engine (fetch,
 // execute, settle, maintenance) plus the workflow scheduler loop. The
 // scheduler is set-based and idempotent, so every worker instance runs it on

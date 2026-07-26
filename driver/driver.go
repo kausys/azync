@@ -60,6 +60,12 @@ type Store interface {
 	// Subscribers returns the registrations for an event type, ordered by name.
 	Subscribers(ctx context.Context, eventType string) ([]Subscriber, error)
 
+	// DeleteSubscriber removes the (name, eventType) registration. An empty
+	// eventType removes every registration of name. It returns the number of
+	// registrations removed; existing delivery jobs already fanned out are
+	// untouched (see Manager.DrainSubscriber to also clear those).
+	DeleteSubscriber(ctx context.Context, name, eventType string) (int64, error)
+
 	// DequeueBatch leases up to p.Limit due pending jobs of (source, p.Kind) for
 	// p.Lease, ordered by run_at then id. Each leased job's attempt is
 	// incremented, a fresh lease token minted, and its retry budget resolved
@@ -255,10 +261,41 @@ type Wake struct {
 // LeaderElector is the optional cluster-wide leadership capability. Cron
 // scheduling requires it; without it, cron is disabled while every other feature
 // keeps working.
+//
+// LeaderElector alone cannot detect a lost leadership: the returned release
+// func is fire-and-forget, so a caller has no way to notice that the backing
+// session died and the lock was silently released server-side (a plain
+// process crash, a network partition, or an idle-connection kill by an
+// intermediary all do this). A driver that can distinguish "still holding
+// the lock" from "lock is gone" should additionally implement LeaseElector;
+// callers that need real fencing (cron does) prefer it when available and
+// fall back to LeaderElector's latch-forever behavior otherwise.
 type LeaderElector interface {
 	// AcquireLeadership tries to take the named leadership. acquired=false means
 	// another instance leads. When acquired, release relinquishes it.
 	AcquireLeadership(ctx context.Context, name string) (release func(), acquired bool, err error)
+}
+
+// LeaseElector is the optional refinement of LeaderElector that exposes
+// leadership as a checkable lease instead of a bare release func, so a caller
+// can detect losing it (e.g. the backing session died) instead of believing
+// it holds leadership forever after one successful acquire.
+type LeaseElector interface {
+	// AcquireLeadershipLease tries to take the named leadership. acquired=false
+	// means another instance leads. When acquired, the returned lease must be
+	// checked periodically with Valid and released with Release when done.
+	AcquireLeadershipLease(ctx context.Context, name string) (lease LeadershipLease, acquired bool, err error)
+}
+
+// LeadershipLease is a held leadership that can be re-verified without
+// re-acquiring it.
+type LeadershipLease interface {
+	// Valid reports whether this leadership is still held. A cheap,
+	// synchronous check (e.g. pinging the session backing the lock) meant to
+	// be called once per scheduler tick, not a full re-acquire attempt.
+	Valid(ctx context.Context) bool
+	// Release relinquishes the leadership. Idempotent.
+	Release()
 }
 
 // Migrator is the optional schema-migration capability. Core.Migrate requires

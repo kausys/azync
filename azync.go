@@ -168,6 +168,11 @@ type Defaults struct {
 	// CompletedRetention is how long succeeded jobs are kept; 0 keeps them
 	// forever.
 	CompletedRetention time.Duration
+	// DeadRetention is how long dead (exhausted-retry) jobs are kept; 0 keeps
+	// them forever. Unlike CompletedRetention, dead jobs are diagnostic
+	// history an operator may want to inspect indefinitely, so the default is
+	// conservative: opt in explicitly to automatic removal.
+	DeadRetention time.Duration
 }
 
 func defaultDefaults() Defaults {
@@ -360,6 +365,12 @@ func WithStatsRetention(d time.Duration) Option {
 // rejected; zero means retain succeeded jobs forever.
 func WithCompletedRetention(d time.Duration) Option {
 	return nonNegativeDuration("WithCompletedRetention", d, func(cfg *Defaults) { cfg.CompletedRetention = d })
+}
+
+// WithDeadRetention sets Defaults.DeadRetention. A negative value is
+// rejected; zero (the default) means retain dead jobs forever.
+func WithDeadRetention(d time.Duration) Option {
+	return nonNegativeDuration("WithDeadRetention", d, func(cfg *Defaults) { cfg.DeadRetention = d })
 }
 
 func positiveDuration(name string, d time.Duration, set func(*Defaults)) Option {

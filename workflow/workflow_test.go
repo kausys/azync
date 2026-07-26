@@ -231,6 +231,121 @@ func TestWorkerRunsOneOperationAndCompletes(t *testing.T) {
 	is.False(processed)
 }
 
+// TestOperationPanicDoesNotCrashWorkerAndFlowsToFailure proves a panicking
+// Operation handler is recovered (mirroring internal/engine.runHandler) and
+// settles through the normal retry/dead path instead of taking down the
+// worker process.
+func TestOperationPanicDoesNotCrashWorkerAndFlowsToFailure(t *testing.T) {
+	is := require.New(t)
+	ctx := context.Background()
+	f := drivertest.NewFake()
+	r := newTestRuntime(t, f, WithLeaseTTL(time.Minute), WithDefaultMaxRetries(1))
+
+	RegisterOperation(r.Worker(), "boom", "1", func(context.Context, struct{}) (string, error) {
+		panic("kaboom")
+	})
+	RegisterWorkflow(r.Worker(), "wf-panic", "1", func(ctx Context, _ struct{}) (string, error) {
+		var out string
+		if err := ExecuteOperation(ctx, "boom", "1", struct{}{}).Get(&out); err != nil {
+			return "", err
+		}
+		return out, nil
+	})
+
+	res, err := r.Client().Start(ctx, "wf-panic", "1", nil)
+	is.NoError(err)
+
+	is.NotPanics(func() {
+		runOneWorkflowTask(t, r.Worker()) // schedules the operation, parks
+		runOneWorkflowTask(t, r.Worker()) // leases+runs it: panics internally, recovered
+	}, "a panicking Operation handler must not crash the worker")
+
+	view := drainUntilTerminal(t, r, res.WorkflowID, 10)
+	is.Equal(driver.WorkflowFailed, view.State)
+	is.Contains(view.FailureReason, "operation panic")
+}
+
+// TestReplayErrorBacksOffThenSuspendsAfterExhaustingRetries proves a
+// determinism-violation-style replay failure (here: a corrupted
+// OperationCompleted payload the cursor cannot decode) consumes the job's
+// retry budget with exponential backoff instead of spinning immediately at
+// full speed (the pre-fix behavior: Release, no budget consumed, run_at =
+// now()), and that exhausting the budget dead-letters the job and suspends
+// the execution — alertable and recoverable — rather than retrying forever.
+func TestReplayErrorBacksOffThenSuspendsAfterExhaustingRetries(t *testing.T) {
+	is := require.New(t)
+	ctx := context.Background()
+	clk := drivertest.NewManualClock(time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC))
+	f := drivertest.NewFake()
+	f.Clock = clk
+	// WorkflowOnly: the real Operation job this test's ExecuteOperation call
+	// schedules is deliberately left unprocessed (its OperationScheduled
+	// history record is overwritten below with a corrupted OperationCompleted
+	// instead) — a combined-mode worker would otherwise dequeue and complete
+	// it first, waking the workflow itself and producing an extra task job
+	// that confuses this test's single-job assertions.
+	r := newTestRuntime(t, f, WithLeaseTTL(time.Minute), WithDefaultMaxRetries(2), WithWorkerMode(WorkerModeWorkflowOnly))
+
+	RegisterOperation(r.Worker(), "op", "1", func(context.Context, struct{}) (string, error) {
+		return "unused", nil
+	})
+	RegisterWorkflow(r.Worker(), "wf-corrupt", "1", func(ctx Context, _ struct{}) (string, error) {
+		var out string
+		if err := ExecuteOperation(ctx, "op", "1", struct{}{}).Get(&out); err != nil {
+			return "", err
+		}
+		return out, nil
+	})
+
+	res, err := r.Client().Start(ctx, "wf-corrupt", "1", nil)
+	is.NoError(err)
+	runOneWorkflowTask(t, r.Worker()) // schedules the operation, parks
+
+	// Corrupt history directly: an OperationCompleted record with a payload
+	// the cursor cannot decode, simulating a determinism violation (e.g. the
+	// registered code changed incompatibly under the same version) without
+	// needing to actually reproduce one.
+	_, err = f.AppendHistory(ctx, res.WorkflowID, "OperationCompleted", json.RawMessage(`{not valid json`))
+	is.NoError(err)
+	is.NoError(enqueueWorkflowTask(ctx, f, "wf-corrupt", res.WorkflowID, time.Time{}))
+
+	// First replay attempt: fails, reschedules with backoff — not dead yet,
+	// and the workflow is still running (not yet suspended).
+	processed, err := r.Worker().ProcessNext(ctx)
+	is.NoError(err)
+	is.True(processed)
+
+	// The original (now succeeded, exempt-from-vacuum) workflow-task job that
+	// scheduled the operation still exists alongside the retried one — find
+	// the one this replay-error path actually rescheduled.
+	jobs, _, err := f.ListJobs(ctx, driver.SourceWorkflow,
+		driver.JobFilter{Kind: workflowTaskKind("wf-corrupt"), State: driver.StateScheduled}, 0, 10)
+	is.NoError(err)
+	is.Len(jobs, 1, "a replay failure within budget must reschedule, not spin at run_at=now()")
+	retriedJob := jobs[0]
+	is.Equal(1, retriedJob.Attempt, "the attempt must be consumed, unlike Release")
+	is.True(retriedJob.RunAt.After(clk.Now()), "backoff must push run_at into the future, not now()")
+
+	view, err := r.Manager().Get(ctx, res.WorkflowID)
+	is.NoError(err)
+	is.Equal(driver.WorkflowRunning, view.State)
+
+	// Advance past the backoff delay and let the second (final) attempt run.
+	clk.Advance(time.Hour)
+	processed, err = r.Worker().ProcessNext(ctx)
+	is.NoError(err)
+	is.True(processed)
+
+	got, err := f.GetJob(ctx, driver.SourceWorkflow, retriedJob.ID)
+	is.NoError(err)
+	is.Equal(driver.StateDead, got.State, "exhausting the retry budget must dead-letter the job")
+
+	view, err = r.Manager().Get(ctx, res.WorkflowID)
+	is.NoError(err)
+	is.Equal(driver.WorkflowSuspended, view.State, "exhaustion must suspend the execution, not fail or spin forever")
+	is.Contains(view.FailureReason, "replay failed after 2 attempts")
+}
+
 func TestOperationUncertainAndResolveComplete(t *testing.T) {
 	is := require.New(t)
 	ctx := context.Background()

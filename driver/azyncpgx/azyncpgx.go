@@ -35,14 +35,26 @@ type Store struct {
 	pool     *pgxpool.Pool
 	ownsPool bool
 
-	schema          string
-	notifyChannel   string
-	migrationsTable string
-	pollOnly        bool
-	logger          *slog.Logger
+	schema           string
+	notifyChannel    string
+	migrationsTable  string
+	pollOnly         bool
+	logger           *slog.Logger
+	statsSlots       int
+	maintenanceBatch int
 
 	listener *listener
 }
+
+// defaultStatsSlots is the number of shards azync_stats_daily rows are spread
+// across per (source, kind, day); WithStatsSlots raises it for very high
+// throughput kinds where even 8-way sharding still serializes.
+const defaultStatsSlots = 8
+
+// defaultMaintenanceBatch bounds how many rows one promote/reap/vacuum
+// statement touches before the driver loops for another batch; see
+// WithMaintenanceBatch.
+const defaultMaintenanceBatch = 1000
 
 // Option configures a Store built with New. Options are applied in order.
 type Option func(*Store)
@@ -78,6 +90,34 @@ func WithLogger(logger *slog.Logger) Option {
 	return func(s *Store) {
 		if logger != nil {
 			s.logger = logger
+		}
+	}
+}
+
+// WithStatsSlots overrides how many shards each (source, kind, day) row in
+// azync_stats_daily is split across (default 8). Every settlement of that
+// kind bumps one randomly chosen slot, so more slots reduce row-lock
+// contention under very high throughput at the cost of a wider SUM when
+// Stats reads it back. n <= 0 is ignored (keeps the default).
+func WithStatsSlots(n int) Option {
+	return func(s *Store) {
+		if n > 0 {
+			s.statsSlots = n
+		}
+	}
+}
+
+// WithMaintenanceBatch overrides how many rows one PromoteDue, ReapExpired,
+// VacuumCompleted, VacuumDead, DeleteAll or RetryAllDead statement touches
+// before the driver loops for another batch (default 1000). Every one of
+// these already loops internally until a batch returns fewer rows than this,
+// so the total processed is unaffected — only how large each individual
+// statement, and its lock/scan footprint, is allowed to grow. n <= 0 is
+// ignored (keeps the default).
+func WithMaintenanceBatch(n int) Option {
+	return func(s *Store) {
+		if n > 0 {
+			s.maintenanceBatch = n
 		}
 	}
 }
@@ -162,6 +202,12 @@ func (s *Store) finishInit() {
 	if s.notifyChannel == "" {
 		s.notifyChannel = defaultChannel(s.schema)
 	}
+	if s.statsSlots <= 0 {
+		s.statsSlots = defaultStatsSlots
+	}
+	if s.maintenanceBatch <= 0 {
+		s.maintenanceBatch = defaultMaintenanceBatch
+	}
 	s.listener = newListener(s.pool, s.notifyChannel, s.pollOnly, s.logger)
 }
 
@@ -203,6 +249,7 @@ var (
 	_ driver.Store              = (*Store)(nil)
 	_ driver.Notifier           = (*Store)(nil)
 	_ driver.LeaderElector      = (*Store)(nil)
+	_ driver.LeaseElector       = (*Store)(nil)
 	_ driver.Migrator           = (*Store)(nil)
 	_ driver.TxStore[pgx.Tx]    = (*Store)(nil)
 	_ driver.DAGStore           = (*Store)(nil)

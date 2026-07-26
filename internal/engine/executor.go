@@ -24,7 +24,22 @@ const instrumentationName = "github.com/kausys/azync/internal/engine"
 func (e *Engine) execute(jobsCtx context.Context, k Kind, job driver.Job, release func()) {
 	defer release()
 
+	e.inflightN.Add(1)
+	defer e.inflightN.Add(-1)
+
 	ctx := jobsCtx
+
+	// The producer's trace context travels in Meta (see InjectTraceContext at
+	// Enqueue/Publish). For an event delivery it lives on the ledger record,
+	// not the delivery job itself — Publish stamps Meta once per event, not
+	// once per fanned-out delivery — so every subscriber's span becomes a
+	// sibling child of the same publish span, which is the correct shape for
+	// a fan-out.
+	carrier := job.Meta
+	if job.Event != nil {
+		carrier = job.Event.Meta
+	}
+	ctx = ExtractTraceContext(ctx, carrier)
 
 	tracer := otel.Tracer(instrumentationName)
 	ctx, span := tracer.Start(ctx, string(e.source)+".job "+job.Kind,
@@ -45,16 +60,20 @@ func (e *Engine) execute(jobsCtx context.Context, k Kind, job driver.Job, releas
 	defer cancelLease()
 	go e.renewLease(ctx, job.ID, job.LeaseToken, cancelLease)
 
+	start := time.Now()
 	result, err := e.runHandler(ctx, k, job)
+	elapsed := time.Since(start)
 	if err == nil {
-		if ackErr := e.acker(context.WithoutCancel(ctx), job.ID, job.LeaseToken, result); ackErr != nil {
+		settleCtx := context.WithoutCancel(ctx)
+		if ackErr := e.acker(settleCtx, job.ID, job.LeaseToken, result); ackErr != nil {
 			logSettleError(e.logger, ackErr, "ack failed", "job", job.ID.String(), "error", ackErr)
 		}
+		e.metrics.recordSettled(settleCtx, job.Kind, "succeeded", elapsed)
 		return
 	}
 
 	span.SetStatus(codes.Error, err.Error())
-	e.settleFailure(context.WithoutCancel(ctx), k, job, err)
+	e.settleFailure(context.WithoutCancel(ctx), k, job, err, elapsed)
 }
 
 // settleFailure lands a failed execution: Snooze parks the job budget-free
@@ -63,7 +82,7 @@ func (e *Engine) execute(jobsCtx context.Context, k Kind, job driver.Job, releas
 // everything else reschedules after the classified delay (or the exponential
 // backoff). Settle errors are logged, never fatal: a stale lease token means
 // another worker already owns the job.
-func (e *Engine) settleFailure(ctx context.Context, k Kind, job driver.Job, err error) {
+func (e *Engine) settleFailure(ctx context.Context, k Kind, job driver.Job, err error, elapsed time.Duration) {
 	logger := e.logger.With("job", job.ID.String(), "kind", job.Kind, "attempt", job.Attempt)
 
 	o := k.Classify(err)
@@ -75,12 +94,14 @@ func (e *Engine) settleFailure(ctx context.Context, k Kind, job driver.Job, err 
 			logSettleError(logger, sErr, "snooze failed", "error", sErr)
 		}
 		logger.Debug("job snoozed", "delay", o.Delay, "error", err)
+		e.metrics.recordSettled(ctx, job.Kind, "snoozed", elapsed)
 
 	case o.Kind == OutcomeAbort:
 		if dErr := e.store.Dead(ctx, job.ID, job.LeaseToken, err.Error()); dErr != nil {
 			logSettleError(logger, dErr, "dead-letter failed", "error", dErr)
 		}
 		logger.Warn("job aborted to dead letter", "error", err)
+		e.metrics.recordSettled(ctx, job.Kind, "dead", elapsed)
 
 	case exhausted:
 		if dErr := e.store.Dead(ctx, job.ID, job.LeaseToken, err.Error()); dErr != nil {
@@ -91,6 +112,7 @@ func (e *Engine) settleFailure(ctx context.Context, k Kind, job driver.Job, err 
 		} else {
 			logger.Warn("job exhausted retries", "error", err)
 		}
+		e.metrics.recordSettled(ctx, job.Kind, "dead", elapsed)
 
 	default:
 		delay := o.Delay
@@ -101,6 +123,7 @@ func (e *Engine) settleFailure(ctx context.Context, k Kind, job driver.Job, err 
 			logSettleError(logger, rErr, "reschedule failed", "error", rErr)
 		}
 		logger.Debug("job rescheduled", "delay", delay, "error", err)
+		e.metrics.recordSettled(ctx, job.Kind, "retried", elapsed)
 	}
 }
 

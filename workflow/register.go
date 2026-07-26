@@ -70,17 +70,35 @@ func RegisterOperation[TIn, TOut any](w *Worker, name, version string, fn func(c
 	})
 }
 
-// registerWorkflow stores fn under (name, version), overwriting any prior
-// registration for the same pair — Register* calls happen once at startup,
-// before Start, so last-registration-wins needs no separate error path.
+// registerWorkflow stores fn under (name, version). Register* calls happen
+// once at startup, before Start, so a duplicate (name, version) is always a
+// programmer error, not a legitimate re-registration: it panics rather than
+// silently overwriting, because the two most likely causes are exactly the
+// ones worth failing loudly on — a copy-paste duplicate registration, or
+// workflow code that changed without bumping its version (a determinism
+// violation replay would otherwise only surface later, and confusingly, as
+// an outcomeError; see settleReplayError). Changing a workflow's or
+// Operation's code always means registering it under a new version.
 func (w *Worker) registerWorkflow(name, version string, fn workflowFunc) {
 	w.mu.Lock()
 	defer w.mu.Unlock()
-	w.workflows[registrationKey(name, version)] = fn
+	key := registrationKey(name, version)
+	if _, exists := w.workflows[key]; exists {
+		panic(fmt.Sprintf(
+			"workflow: RegisterWorkflow(%q, %q) called twice; changing workflow code requires a new version, not re-registering the same one",
+			name, version))
+	}
+	w.workflows[key] = fn
 }
 
 func (w *Worker) registerOperation(name, version string, fn operationFunc) {
 	w.mu.Lock()
 	defer w.mu.Unlock()
-	w.operations[registrationKey(name, version)] = fn
+	key := registrationKey(name, version)
+	if _, exists := w.operations[key]; exists {
+		panic(fmt.Sprintf(
+			"workflow: RegisterOperation(%q, %q) called twice; changing operation code requires a new version, not re-registering the same one",
+			name, version))
+	}
+	w.operations[key] = fn
 }

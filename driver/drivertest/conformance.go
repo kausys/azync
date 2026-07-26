@@ -48,12 +48,59 @@ func RunConformance(t *testing.T, newStore func(t *testing.T) driver.Store) {
 	t.Run("ReapExpired", func(t *testing.T) { runReap(t, store) })
 	t.Run("PromoteDue", func(t *testing.T) { runPromoteDue(t, store) })
 	t.Run("Publish", func(t *testing.T) { runPublish(t, store) })
+	t.Run("DeleteSubscriber", func(t *testing.T) { runDeleteSubscriber(t, store) })
 	t.Run("Replay", func(t *testing.T) { runReplay(t, store) })
 	t.Run("Retain", func(t *testing.T) { runRetain(t, store) })
 	t.Run("Admin", func(t *testing.T) { runAdmin(t, store) })
 	t.Run("ListJobsOrdering", func(t *testing.T) { runListJobsOrdering(t, store) })
 	t.Run("Vacuums", func(t *testing.T) { runVacuums(t, store) })
 	t.Run("NukeAll", func(t *testing.T) { runNukeAll(t, store) })
+}
+
+// runDeleteSubscriber proves DeleteSubscriber removes a (name, eventType)
+// registration, an empty eventType removes every registration of name, a
+// no-match delete is a no-op (0 removed, no error), and a deleted
+// subscriber's fan-out stops on the next publish.
+func runDeleteSubscriber(t *testing.T, store driver.Store) {
+	t.Helper()
+	ctx := context.Background()
+	is := require.New(t)
+
+	is.NoError(store.RegisterSubscriber(ctx, driver.Subscriber{Name: "delsub_a", EventType: "evt.delsub1", MaxAttempts: 3}))
+	is.NoError(store.RegisterSubscriber(ctx, driver.Subscriber{Name: "delsub_a", EventType: "evt.delsub2", MaxAttempts: 3}))
+
+	// Deleting one (name, eventType) pair leaves the other registration
+	// for the same name untouched.
+	removed, err := store.DeleteSubscriber(ctx, "delsub_a", "evt.delsub1")
+	is.NoError(err)
+	is.EqualValues(1, removed)
+
+	subs1, err := store.Subscribers(ctx, "evt.delsub1")
+	is.NoError(err)
+	is.Empty(subs1, "the deleted registration must no longer be listed")
+
+	subs2, err := store.Subscribers(ctx, "evt.delsub2")
+	is.NoError(err)
+	is.Len(subs2, 1, "the untouched registration for the same name must survive")
+
+	// A no-match delete is a no-op, not an error.
+	removed, err = store.DeleteSubscriber(ctx, "delsub_never_registered", "evt.delsub1")
+	is.NoError(err)
+	is.Zero(removed)
+
+	// An empty eventType removes every registration of name.
+	is.NoError(store.RegisterSubscriber(ctx, driver.Subscriber{Name: "delsub_b", EventType: "evt.delsub3", MaxAttempts: 3}))
+	is.NoError(store.RegisterSubscriber(ctx, driver.Subscriber{Name: "delsub_b", EventType: "evt.delsub4", MaxAttempts: 3}))
+	removed, err = store.DeleteSubscriber(ctx, "delsub_b", "")
+	is.NoError(err)
+	is.EqualValues(2, removed)
+
+	subs3, err := store.Subscribers(ctx, "evt.delsub3")
+	is.NoError(err)
+	is.Empty(subs3)
+	subs4, err := store.Subscribers(ctx, "evt.delsub4")
+	is.NoError(err)
+	is.Empty(subs4)
 }
 
 // ---- shared helpers -------------------------------------------------------
@@ -687,6 +734,37 @@ func runAdmin(t *testing.T, store driver.Store) {
 		is.NoError(err)
 		is.Equal(int64(2), depths["adm_depth"].Pending)
 		is.Equal(int64(1), depths["adm_depth"].Scheduled)
+	})
+
+	t.Run("KindDepths reports the oldest pending job's age", func(t *testing.T) {
+		is := require.New(t)
+		past := time.Now().Add(-500 * time.Millisecond)
+		_, err := store.Enqueue(ctx, driver.EnqueueParams{
+			ID: uuid.New(), Kind: "adm_depth_age", Payload: json.RawMessage(`{}`), RunAt: past})
+		is.NoError(err)
+		// A second, more recently due job must not shrink the oldest age.
+		_, err = store.Enqueue(ctx, driver.EnqueueParams{
+			ID: uuid.New(), Kind: "adm_depth_age", Payload: json.RawMessage(`{}`)})
+		is.NoError(err)
+
+		depths, err := store.KindDepths(ctx, driver.SourceQueue)
+		is.NoError(err)
+		age := depths["adm_depth_age"].OldestPendingAge
+		is.Greater(age, 400*time.Millisecond, "age must reflect the run_at set half a second in the past")
+		is.Less(age, 30*time.Second, "age must be a sane, bounded value computed against the backend clock")
+	})
+
+	t.Run("KindDepths reports zero age once nothing is pending", func(t *testing.T) {
+		is := require.New(t)
+		id := enqueueDue(ctx, t, store, "adm_depth_nopending")
+		leased := dequeueN(ctx, t, store, driver.SourceQueue, "adm_depth_nopending", 1, time.Minute)
+		is.Len(leased, 1)
+		is.Equal(id, leased[0].ID)
+		is.NoError(store.Ack(ctx, leased[0].ID, leased[0].LeaseToken))
+
+		depths, err := store.KindDepths(ctx, driver.SourceQueue)
+		is.NoError(err)
+		is.Zero(depths["adm_depth_nopending"].OldestPendingAge)
 	})
 
 	t.Run("GetJob returns not-found for a missing id", func(t *testing.T) {

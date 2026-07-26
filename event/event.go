@@ -77,6 +77,7 @@ func newRuntime(core *azync.Core, opts []Option, forOpen bool) (*Runtime, error)
 			MaxReaps:           cfg.MaxReaps,
 			StatsRetention:     cfg.StatsRetention,
 			CompletedRetention: cfg.CompletedRetention,
+			DeadRetention:      cfg.DeadRetention,
 			PromoteInterval:    cfg.promoteInterval,
 			VacuumInterval:     cfg.vacuumInterval,
 		},
@@ -90,6 +91,7 @@ func newRuntime(core *azync.Core, opts []Option, forOpen bool) (*Runtime, error)
 		store:  core.Store(),
 		logger: core.Logger(),
 		subs:   map[string]subRegistration{},
+		now:    time.Now,
 	}
 	r.manager = &Manager{store: core.Store()}
 	return r, nil
@@ -109,9 +111,16 @@ func (r *Runtime) Manager() *Manager { return r.manager }
 func (r *Runtime) Migrate(ctx context.Context) error { return r.core.Migrate(ctx) }
 
 // Close releases the runtime's resources: the private Core when the runtime was
-// built with Open, nothing when it composes over a shared Core.
+// built with Open, nothing when it composes over a shared Core. When the
+// runtime owns its Core, Close first waits (bounded by ctx) for a running
+// Worker to finish draining, so the store is not closed out from under
+// in-flight settlements; on timeout it logs a warning and closes anyway
+// rather than hanging indefinitely.
 func (r *Runtime) Close(ctx context.Context) error {
 	if r.ownedCore {
+		if err := r.worker.Wait(ctx); err != nil {
+			r.core.Logger().Warn("event: Close: worker did not finish draining before ctx ended, closing store anyway", "error", err)
+		}
 		return r.core.Close(ctx)
 	}
 	return nil
@@ -141,6 +150,14 @@ type Subscription struct {
 // event-only default; the shared knobs default from the core (azync.Defaults).
 const defaultHandlerTimeout = 5 * time.Minute
 
+// defaultRetentionInterval is how often the ledger retention loop sweeps when
+// WithLedgerRetention is set; overridable in tests via withRetentionInterval.
+const defaultRetentionInterval = time.Hour
+
+// retainBatch bounds each Retain call the ledger retention loop issues, so a
+// large backlog is swept in bounded steps rather than one unbounded delete.
+const retainBatch = 1000
+
 // config is the runtime's resolved settings: the core's shared defaults as the
 // baseline, plus the event-only handler timeout, all overridable per runtime by
 // With* options (package option > core option > default).
@@ -149,12 +166,19 @@ type config struct {
 
 	handlerTimeout time.Duration
 
+	// ledgerRetention bounds the event ledger (azync_events and cascaded
+	// deliveries); 0 (the default) disables the retention loop entirely, so
+	// existing deployments see no behavior change until they opt in.
+	ledgerRetention time.Duration
+
 	coreOptions []azync.Option
 
 	// promoteInterval and vacuumInterval shrink the engine maintenance cadences
-	// in tests; they are deliberately not exposed as public options.
-	promoteInterval time.Duration
-	vacuumInterval  time.Duration
+	// in tests; retentionInterval does the same for the ledger retention loop.
+	// They are deliberately not exposed as public options.
+	promoteInterval   time.Duration
+	vacuumInterval    time.Duration
+	retentionInterval time.Duration
 }
 
 // Option configures an event Runtime. Options compose; later options win.
@@ -164,8 +188,9 @@ type Option func(*config) error
 // WithCoreOptions, which only makes sense when the runtime owns its Core.
 func resolveConfig(defaults azync.Defaults, opts []Option, forOpen bool) (config, error) {
 	c := config{
-		Defaults:       defaults,
-		handlerTimeout: defaultHandlerTimeout,
+		Defaults:          defaults,
+		handlerTimeout:    defaultHandlerTimeout,
+		retentionInterval: defaultRetentionInterval,
 	}
 	for _, opt := range opts {
 		if err := opt(&c); err != nil {
@@ -256,6 +281,22 @@ func WithCompletedRetention(d time.Duration) Option {
 	return nonNegativeDuration("WithCompletedRetention", d, func(c *config) { c.CompletedRetention = d })
 }
 
+// WithDeadRetention overrides how long dead (exhausted-retry) deliveries are
+// kept. A negative value is rejected; zero (the default) means retain
+// forever.
+func WithDeadRetention(d time.Duration) Option {
+	return nonNegativeDuration("WithDeadRetention", d, func(c *config) { c.DeadRetention = d })
+}
+
+// WithLedgerRetention enables the ledger retention loop, sweeping ledger
+// events older than d whose deliveries have all reached a terminal state
+// (see driver.Store.Retain) roughly once an hour. A negative value is
+// rejected; zero (the default) disables the loop, matching prior behavior —
+// the ledger is retained forever unless an operator opts in.
+func WithLedgerRetention(d time.Duration) Option {
+	return nonNegativeDuration("WithLedgerRetention", d, func(c *config) { c.ledgerRetention = d })
+}
+
 // WithCoreOptions forwards options to the Core that Open builds internally
 // (schema, logger, notify channel, shared defaults...). Valid only with Open;
 // New rejects it because the Core is already constructed.
@@ -272,6 +313,15 @@ func withMaintenanceIntervals(promote, vacuum time.Duration) Option {
 	return func(c *config) error {
 		c.promoteInterval = promote
 		c.vacuumInterval = vacuum
+		return nil
+	}
+}
+
+// withRetentionInterval shrinks the ledger retention loop's sweep cadence.
+// Test seam only.
+func withRetentionInterval(d time.Duration) Option {
+	return func(c *config) error {
+		c.retentionInterval = d
 		return nil
 	}
 }

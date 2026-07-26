@@ -8,9 +8,11 @@ import (
 	"maps"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/kausys/azync/driver"
+	"github.com/kausys/azync/internal/engine"
 	"github.com/kausys/azync/workflow/kernel"
 
 	"github.com/google/uuid"
@@ -55,6 +57,29 @@ type Worker struct {
 	mu         sync.Mutex
 	workflows  map[string]workflowFunc
 	operations map[string]operationFunc
+
+	started atomic.Bool
+	done    chan struct{}
+	// doneOnce guards done against a double-close if Start is ever called
+	// more than once (not itself guarded against, matching prior behavior).
+	doneOnce sync.Once
+}
+
+// Wait blocks until a Start call has returned, or ctx ends first, whichever
+// comes first. If Start was never called, Wait returns immediately (there is
+// nothing to wait for). Close uses Wait to avoid closing a shared store out
+// from under an in-flight drain; callers coordinating their own shutdown
+// (stop ctx, then Wait, then release other resources) should do the same.
+func (w *Worker) Wait(ctx context.Context) error {
+	if !w.started.Load() {
+		return nil
+	}
+	select {
+	case <-w.done:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
 }
 
 // registeredNames returns the distinct workflow names currently registered
@@ -94,36 +119,85 @@ func (w *Worker) snapshotOperations() map[string]operationFunc {
 	return out
 }
 
-// Start runs the worker until ctx is cancelled: ProcessNext polling plus a
-// vacuum loop that removes terminal executions past WithRetention.
+// Start runs the worker until ctx is cancelled: WithConcurrency parallel
+// polling passes (each leasing and processing at most one job at a time,
+// exactly like ProcessNext), a vacuum loop that removes terminal executions
+// past WithRetention, and a reconciler loop that re-enqueues a
+// workflow-task for any running execution ListStalledWorkflows finds with
+// no live task (defense-in-depth; see its doc comment —
+// StartWorkflow/SignalWorkflow already schedule their task atomically with
+// their own effect).
+//
+// On cancellation, in-flight passes drain for up to WithShutdownDrain
+// before their context is cancelled, then a final bounded grace period
+// before Start gives up on them and returns anyway — the same shape as
+// internal/engine's drain, and for the same reason: a handler that ignores
+// cancellation must not hang shutdown forever. Start returns nil after a
+// graceful shutdown, drained or not.
 func (w *Worker) Start(ctx context.Context) error {
-	vacCtx, cancelVac := context.WithCancel(ctx)
-	defer cancelVac()
+	w.started.Store(true)
+	defer w.doneOnce.Do(func() { close(w.done) })
 
 	var loops sync.WaitGroup
-	loops.Go(func() { w.vacuumLoop(vacCtx) })
+	loops.Go(func() { w.vacuumLoop(ctx) })
+	loops.Go(func() { w.reconcileLoop(ctx) })
 
-	err := w.pollLoop(ctx)
-	cancelVac()
+	// jobsCtx outlives ctx by the drain budget so an in-flight pass's
+	// settlement (Ack/Release/Dead/AppendHistory/ScheduleTask/...) finishes
+	// even after shutdown begins; process*Job runs on it, never on ctx
+	// directly (see dequeueOperations/dequeueWorkflows).
+	jobsCtx, cancelJobs := context.WithCancel(context.Background())
+	defer cancelJobs()
+
+	n := max(w.cfg.concurrency, 1)
+	var pollers sync.WaitGroup
+	for range n {
+		pollers.Go(func() { w.pollLoop(ctx, jobsCtx) })
+	}
+
+	<-ctx.Done()
 	loops.Wait()
-	return err
+
+	drained := make(chan struct{})
+	go func() { pollers.Wait(); close(drained) }()
+	select {
+	case <-drained:
+		return nil
+	case <-time.After(w.cfg.shutdownDrain):
+	}
+
+	w.logger.Warn("workflow worker drain budget exhausted, cancelling in-flight passes")
+	cancelJobs()
+	select {
+	case <-drained:
+	case <-time.After(finalDrainGrace):
+		// The abandoned passes are leaked (drained's goroutine keeps waiting
+		// in the background), not killed: their jobs recover via the lease
+		// reaper once the lease expires.
+		w.logger.Error("workflow worker hard drain timeout exceeded, abandoning in-flight passes")
+	}
+	return nil
 }
 
-func (w *Worker) pollLoop(ctx context.Context) error {
+func (w *Worker) pollLoop(ctx, jobsCtx context.Context) {
 	for {
 		if ctx.Err() != nil {
-			return ctx.Err()
+			return
 		}
-		processed, err := w.ProcessNext(ctx)
+		processed, err := w.processNext(ctx, jobsCtx)
 		if err != nil && ctx.Err() == nil {
 			w.logger.Error("workflow task processing failed", "error", err)
 		}
-		if processed {
+		// Only a clean, successful pass retries immediately; any error —
+		// including one already logged and settled inside processNext, such
+		// as a replay failure's Reschedule — paces through the poll interval
+		// instead of spinning at full speed against the store.
+		if processed && err == nil {
 			continue
 		}
 		select {
 		case <-ctx.Done():
-			return ctx.Err()
+			return
 		case <-time.After(w.cfg.fetchPollInterval):
 		}
 	}
@@ -151,6 +225,52 @@ func (w *Worker) vacuumLoop(ctx context.Context) {
 	}
 }
 
+// reconcileBatch bounds one ListStalledWorkflows call so a large backlog is
+// swept in bounded steps.
+const reconcileBatch = 100
+
+// reconcileLoop periodically finds running executions with no live task
+// (ListStalledWorkflows) and re-enqueues a workflow-task to revive them.
+// Defense-in-depth: StartWorkflow and SignalWorkflow already schedule their
+// task atomically with their own effect (see their doc comments), so a
+// stall found here means something outside that path — a row predating this
+// guarantee, an operator deleting a job by hand, a driver bug — left an
+// execution stranded.
+func (w *Worker) reconcileLoop(ctx context.Context) {
+	if w.cfg.reconcileInterval <= 0 {
+		return
+	}
+	ticker := time.NewTicker(w.cfg.reconcileInterval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			w.reconcileOnce(ctx)
+		}
+	}
+}
+
+func (w *Worker) reconcileOnce(ctx context.Context) {
+	olderThan := w.cfg.leaseTTL * stalledAfterLeaseMultiple
+	stalled, err := w.store.ListStalledWorkflows(ctx, olderThan, reconcileBatch)
+	if err != nil {
+		if ctx.Err() == nil {
+			w.logger.Error("workflow reconcile: list stalled workflows failed", "error", err)
+		}
+		return
+	}
+	for _, sw := range stalled {
+		w.logger.Warn("workflow reconciler reviving stalled execution: no live task found",
+			"workflow_id", sw.ID.String(), "name", sw.Name)
+		if err := enqueueWorkflowTask(ctx, w.store, sw.Name, sw.ID, time.Time{}); err != nil {
+			w.logger.Error("workflow reconcile: re-enqueue failed",
+				"workflow_id", sw.ID.String(), "name", sw.Name, "error", err)
+		}
+	}
+}
+
 // ProcessNext dequeues and processes at most one due workflow-task or
 // Operation-task job, returning processed=false when none was ready. It is
 // the synchronous building block Start loops on, and is directly useful in
@@ -161,6 +281,22 @@ func (w *Worker) vacuumLoop(ctx context.Context) {
 // has no separate background maintenance loop over
 // [driver.Store.PromoteDue].
 func (w *Worker) ProcessNext(ctx context.Context) (bool, error) {
+	return w.processNext(ctx, ctx)
+}
+
+// processNext is ProcessNext's implementation. jobsCtx is what a leased
+// job's actual processing (process*Job) runs on; ctx governs everything
+// else (promote-due, dequeue, and the poll loop's own pacing). A direct
+// ProcessNext call passes the same context for both, preserving its
+// documented single-ctx behavior; Start's poll loop passes its long-lived
+// jobsCtx (see Start's doc comment) so an in-flight settlement survives
+// ctx's cancellation during the shutdown drain window.
+//
+// It first promotes any due scheduled job (a durable Sleep or Operation
+// retry_wait) to pending: unlike dag.Worker and queue.Worker, this worker
+// has no separate background maintenance loop over
+// [driver.Store.PromoteDue].
+func (w *Worker) processNext(ctx, jobsCtx context.Context) (bool, error) {
 	names := w.registeredNames()
 	opKinds := w.registeredOperationKinds()
 	kinds := make([]string, 0, len(names)+len(opKinds))
@@ -176,18 +312,18 @@ func (w *Worker) ProcessNext(ctx context.Context) (bool, error) {
 
 	switch w.cfg.workerMode {
 	case WorkerModeOperationOnly:
-		return w.dequeueOperations(ctx, opKinds)
+		return w.dequeueOperations(ctx, jobsCtx, opKinds)
 	case WorkerModeWorkflowOnly:
-		return w.dequeueWorkflows(ctx, names)
+		return w.dequeueWorkflows(ctx, jobsCtx, names)
 	default: // combined: prefer Operations so parked workflows unblock promptly
-		if ok, err := w.dequeueOperations(ctx, opKinds); ok || err != nil {
+		if ok, err := w.dequeueOperations(ctx, jobsCtx, opKinds); ok || err != nil {
 			return ok, err
 		}
-		return w.dequeueWorkflows(ctx, names)
+		return w.dequeueWorkflows(ctx, jobsCtx, names)
 	}
 }
 
-func (w *Worker) dequeueOperations(ctx context.Context, kinds []string) (bool, error) {
+func (w *Worker) dequeueOperations(ctx, jobsCtx context.Context, kinds []string) (bool, error) {
 	for _, kind := range kinds {
 		jobs, err := w.jobs.DequeueBatch(ctx, driver.SourceWorkflow, driver.DequeueParams{
 			Kind:               kind,
@@ -202,12 +338,12 @@ func (w *Worker) dequeueOperations(ctx context.Context, kinds []string) (bool, e
 		if len(jobs) == 0 {
 			continue
 		}
-		return true, w.processOperationJob(ctx, jobs[0])
+		return true, w.processOperationJob(jobsCtx, jobs[0])
 	}
 	return false, nil
 }
 
-func (w *Worker) dequeueWorkflows(ctx context.Context, names []string) (bool, error) {
+func (w *Worker) dequeueWorkflows(ctx, jobsCtx context.Context, names []string) (bool, error) {
 	for _, name := range names {
 		jobs, err := w.jobs.DequeueBatch(ctx, driver.SourceWorkflow, driver.DequeueParams{
 			Kind:               workflowTaskKind(name),
@@ -222,7 +358,7 @@ func (w *Worker) dequeueWorkflows(ctx context.Context, names []string) (bool, er
 		if len(jobs) == 0 {
 			continue
 		}
-		return true, w.processJob(ctx, jobs[0])
+		return true, w.processJob(jobsCtx, jobs[0])
 	}
 	return false, nil
 }
@@ -309,9 +445,44 @@ func (w *Worker) processJob(ctx context.Context, job driver.Job) error {
 		return w.jobs.Ack(ctx, job.ID, job.LeaseToken)
 
 	default: // outcomeError: an internal replay failure, not a workflow failure.
-		w.logger.Error("workflow replay failed", "workflow_id", workflowID.String(), "error", outcome.err)
-		return w.jobs.Release(ctx, job.ID, job.LeaseToken)
+		return w.settleReplayError(ctx, job, workflowID, outcome.err)
 	}
+}
+
+// settleReplayError handles an internal replay failure (a determinism
+// violation, a panic in the workflow function, a corrupt history record) —
+// never a failure the workflow function itself returned. Release (the
+// original handling here) never consumes the retry budget and reschedules
+// with run_at = now(), so a persistent replay failure spun this job at full
+// speed against the store forever (pollLoop's immediate-continue made it
+// worse, see the fix there). This settles like any other handler failure
+// instead: Reschedule with exponential backoff consumes an attempt, and
+// exhausting the budget suspends the execution — alertable, preserving
+// history — rather than retrying forever.
+func (w *Worker) settleReplayError(ctx context.Context, job driver.Job, workflowID uuid.UUID, replayErr error) error {
+	logger := w.logger.With("workflow_id", workflowID.String(), "job", job.ID.String(), "attempt", job.Attempt)
+
+	if job.Attempt < job.MaxAttempts {
+		logger.Error("workflow replay failed, rescheduling with backoff", "error", replayErr)
+		err := w.jobs.Reschedule(ctx, job.ID, job.LeaseToken, engine.Backoff(job.Attempt), replayErr.Error())
+		if driver.IsNotFound(err) {
+			return nil
+		}
+		return err
+	}
+
+	reason := fmt.Sprintf("workflow: replay failed after %d attempts: %v", job.Attempt, replayErr)
+	logger.Error("workflow replay exhausted retries, suspending execution", "error", replayErr)
+	if err := w.jobs.Dead(ctx, job.ID, job.LeaseToken, reason); err != nil {
+		if driver.IsNotFound(err) {
+			return nil
+		}
+		return err
+	}
+	if err := w.store.SuspendWorkflow(ctx, workflowID, reason); err != nil {
+		logger.Error("workflow: suspend after replay exhaustion failed", "error", err)
+	}
+	return nil
 }
 
 // recordTerminal appends a terminal history marker best-effort: the

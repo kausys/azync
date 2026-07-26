@@ -8,9 +8,15 @@ import (
 	"time"
 
 	"github.com/kausys/azync/driver"
+	"github.com/kausys/azync/internal/engine"
 
 	"github.com/google/uuid"
+	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/trace"
 )
+
+// instrumentationName is this package's OpenTelemetry instrumentation scope.
+const instrumentationName = "github.com/kausys/azync/queue"
 
 // Producer enqueues jobs.
 type Producer struct {
@@ -80,8 +86,15 @@ func Meta(key, value string) EnqueueOption {
 }
 
 // Enqueue durably inserts a job for args.Kind(). It returns Deduplicated=true
-// when an idempotency key dropped the insert.
+// when an idempotency key dropped the insert. A producer span wraps the call
+// (SpanKindProducer), and ctx's trace context (if any) travels with the job
+// via Meta so the handler's consumer span becomes its child (see
+// engine.ExtractTraceContext).
 func (p *Producer) Enqueue(ctx context.Context, args JobArgs, opts ...EnqueueOption) (EnqueueResult, error) {
+	ctx, span := otel.Tracer(instrumentationName).Start(ctx, "queue.enqueue "+args.Kind(),
+		trace.WithSpanKind(trace.SpanKindProducer))
+	defer span.End()
+
 	params, err := p.makeParams(ctx, args, opts...)
 	if err != nil {
 		return EnqueueResult{}, err
@@ -93,7 +106,7 @@ func (p *Producer) Enqueue(ctx context.Context, args JobArgs, opts ...EnqueueOpt
 	return EnqueueResult{ID: params.ID, Deduplicated: !inserted}, nil
 }
 
-func (p *Producer) makeParams(_ context.Context, args JobArgs, opts ...EnqueueOption) (driver.EnqueueParams, error) {
+func (p *Producer) makeParams(ctx context.Context, args JobArgs, opts ...EnqueueOption) (driver.EnqueueParams, error) {
 	o := enqueueOptions{maxRetries: p.defaultMaxAttempts}
 	for _, opt := range opts {
 		opt(&o)
@@ -108,7 +121,7 @@ func (p *Producer) makeParams(_ context.Context, args JobArgs, opts ...EnqueueOp
 		ID:                  uuid.New(),
 		Kind:                args.Kind(),
 		Payload:             payload,
-		Meta:                o.meta,
+		Meta:                engine.InjectTraceContext(ctx, o.meta),
 		RunAt:               o.runAt,
 		Delay:               o.delay,
 		MaxAttempts:         o.maxRetries,

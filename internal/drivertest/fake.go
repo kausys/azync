@@ -18,6 +18,7 @@ import (
 	"slices"
 	"strconv"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/kausys/azync/driver"
@@ -40,6 +41,7 @@ type Fake struct {
 	attempts    map[uuid.UUID][]driver.AttemptError
 	stats       map[statKey]*statCounters
 	leaders     map[string]bool
+	activeLease map[string]*fakeLease
 	dags        map[uuid.UUID]*fakeDAG
 	executions  map[uuid.UUID]*fakeExecution
 	signalKeys  map[signalDedupeKey]bool // (workflow, name, messageID) already-inserted signals
@@ -60,6 +62,7 @@ func NewFake() *Fake {
 		attempts:    map[uuid.UUID][]driver.AttemptError{},
 		stats:       map[statKey]*statCounters{},
 		leaders:     map[string]bool{},
+		activeLease: map[string]*fakeLease{},
 		dags:        map[uuid.UUID]*fakeDAG{},
 		executions:  map[uuid.UUID]*fakeExecution{},
 		signalKeys:  map[signalDedupeKey]bool{},
@@ -378,6 +381,21 @@ func (f *Fake) Subscribers(_ context.Context, eventType string) ([]driver.Subscr
 	return f.subscribersFor(eventType), nil
 }
 
+// DeleteSubscriber removes the (name, eventType) registration, or every
+// registration of name when eventType is empty.
+func (f *Fake) DeleteSubscriber(_ context.Context, name, eventType string) (int64, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	var removed int64
+	for k := range f.subscribers {
+		if k.name == name && (eventType == "" || k.eventType == eventType) {
+			delete(f.subscribers, k)
+			removed++
+		}
+	}
+	return removed, nil
+}
+
 // --- fetch ---------------------------------------------------------------
 
 // DequeueBatch leases up to Limit due pending jobs of (source, Kind).
@@ -688,6 +706,7 @@ func (f *Fake) KindDepths(_ context.Context, source driver.Source) (map[string]d
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	out := map[string]driver.Depths{}
+	oldestPending := map[string]time.Time{}
 	for _, j := range f.jobs {
 		if j.Source != source {
 			continue
@@ -695,6 +714,17 @@ func (f *Fake) KindDepths(_ context.Context, source driver.Source) (map[string]d
 		d := out[j.Kind]
 		addDepth(&d, j.State)
 		out[j.Kind] = d
+		if j.State == driver.StatePending {
+			if t, ok := oldestPending[j.Kind]; !ok || j.RunAt.Before(t) {
+				oldestPending[j.Kind] = j.RunAt
+			}
+		}
+	}
+	now := f.now()
+	for kind, t := range oldestPending {
+		d := out[kind]
+		d.OldestPendingAge = now.Sub(t)
+		out[kind] = d
 	}
 	return out, nil
 }
@@ -704,10 +734,19 @@ func (f *Fake) Stats(_ context.Context, source driver.Source, kind string) (driv
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	var depths driver.Depths
+	var oldestPending time.Time
+	hasPending := false
 	for _, j := range f.jobs {
 		if j.Source == source && j.Kind == kind {
 			addDepth(&depths, j.State)
+			if j.State == driver.StatePending && (!hasPending || j.RunAt.Before(oldestPending)) {
+				oldestPending = j.RunAt
+				hasPending = true
+			}
 		}
+	}
+	if hasPending {
+		depths.OldestPendingAge = f.now().Sub(oldestPending)
 	}
 	daily := f.dailyLocked(source, &kind)
 	return depths, daily, nil
@@ -1238,22 +1277,67 @@ func (f *Fake) wake(source driver.Source, kind string) {
 	}
 }
 
-// --- LeaderElector capability --------------------------------------------
+// --- LeaderElector / LeaseElector capabilities ----------------------------
 
 // AcquireLeadership takes the named in-memory lock if it is free.
-func (f *Fake) AcquireLeadership(_ context.Context, name string) (func(), bool, error) {
+func (f *Fake) AcquireLeadership(ctx context.Context, name string) (func(), bool, error) {
+	lease, acquired, err := f.AcquireLeadershipLease(ctx, name)
+	if err != nil || !acquired {
+		return func() {}, acquired, err
+	}
+	return lease.Release, true, nil
+}
+
+// AcquireLeadershipLease takes the named in-memory lock if it is free,
+// returning a lease that InvalidateLeadership can later flip to lost —
+// simulating a dropped session without an explicit Release, the way a real
+// backend's connection can die out from under a held lock.
+func (f *Fake) AcquireLeadershipLease(_ context.Context, name string) (driver.LeadershipLease, bool, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	if f.leaders[name] {
-		return func() {}, false, nil
+		return nil, false, nil
 	}
 	f.leaders[name] = true
-	release := func() {
-		f.mu.Lock()
-		defer f.mu.Unlock()
-		delete(f.leaders, name)
+	lease := &fakeLease{f: f, name: name}
+	f.activeLease[name] = lease
+	return lease, true, nil
+}
+
+// InvalidateLeadership simulates the named leadership's backing session
+// dying: the next Valid check on its lease reports false, without releasing
+// the in-memory lock (mirroring a real advisory lock outliving the caller's
+// awareness until it re-checks). A name with no active lease is a no-op.
+func (f *Fake) InvalidateLeadership(name string) {
+	f.mu.Lock()
+	lease := f.activeLease[name]
+	f.mu.Unlock()
+	if lease != nil {
+		lease.invalid.Store(true)
 	}
-	return release, true, nil
+}
+
+// fakeLease is an in-memory leadership lease.
+type fakeLease struct {
+	f       *Fake
+	name    string
+	invalid atomic.Bool
+	once    sync.Once
+}
+
+// Valid reports whether this leadership has not been invalidated.
+func (l *fakeLease) Valid(context.Context) bool { return !l.invalid.Load() }
+
+// Release is idempotent: it frees the in-memory lock.
+func (l *fakeLease) Release() {
+	l.once.Do(func() {
+		l.f.mu.Lock()
+		defer l.f.mu.Unlock()
+		delete(l.f.leaders, l.name)
+		if l.f.activeLease[l.name] == l {
+			delete(l.f.activeLease, l.name)
+		}
+	})
 }
 
 // --- small helpers -------------------------------------------------------

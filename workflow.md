@@ -17,6 +17,8 @@ wf, err := workflow.New(core)
 
 Migrate the Core. Register every `(name, version)` for workflows and Operations **before** `Worker.Start`.
 
+**Changing a workflow's or Operation's code always means registering it under a new version.** Replay re-executes the function against durable history, so editing the code registered under a version already in flight is a determinism violation: an in-progress execution's next replay pass may see a call sequence that no longer matches what its history recorded, and the workflow-task job retries with backoff, then suspends the execution once its retry budget is exhausted (alertable via `Manager.Get`, recoverable with `ResumeWorkflow` once the code is fixed) — never silently wrong, but not obviously connected to "I edited the handler" either. `RegisterWorkflow` / `RegisterOperation` panic immediately if called twice for the same `(name, version)`, so a copy-paste duplicate registration or a forgotten version bump fails at startup instead of at replay time.
+
 ## Register and start
 
 ```go
@@ -132,6 +134,7 @@ MVP Manager has no List/Retry/Compensate (those are dag concerns).
 | Operations | At-least-once, leased, heartbeaten |
 | Ambiguous side effect | `uncertain` + suspend → `ResolveUncertain` |
 | Business start key | Dedupes live executions only |
+| Replay/determinism error | Retries with backoff, then suspends (no version bump) |
 
 ## vs dag
 

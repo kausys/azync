@@ -319,7 +319,7 @@ func TestWorkerShutdownDrainLetsSlowDeliveryFinish(t *testing.T) {
 	case <-time.After(2 * time.Second):
 		t.Fatal("delivery did not start")
 	}
-	is.ErrorIs(stop(), context.Canceled)
+	is.NoError(stop(), "Start returns nil after a graceful, drained shutdown")
 	is.False(canceled.Load(), "a delivery inside the drain budget must complete, not be cancelled")
 	is.Equal(driver.StateSucceeded, deliveryOf(t, f, "billing").State)
 }

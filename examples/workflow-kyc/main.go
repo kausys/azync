@@ -38,7 +38,7 @@ import (
 // defaultDSN matches the repo's compose.yml; override with DATABASE_URL.
 //
 //nolint:gosec // not a credential leak: matches compose.yml's dev-only DB
-const defaultDSN = "postgres://azync:azync@localhost:5432/azync?sslmode=disable"
+const defaultDSN = "postgres://azync:azync@localhost:5433/azync?sslmode=disable"
 
 // ref identifies the KYC subject; it seeds the workflow's business
 // idempotency key, so re-running main against a live execution is a no-op.

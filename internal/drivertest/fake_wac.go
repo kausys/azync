@@ -14,6 +14,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"sort"
 	"time"
 
 	"github.com/kausys/azync/driver"
@@ -62,9 +63,28 @@ func (e *fakeExecution) cloneView() driver.WorkflowExecutionView {
 	return out
 }
 
+// workflowTaskKindFmt mirrors workflow/worker.go's unexported
+// workflowTaskKind: the fetch partition a workflow's tasks route through.
+// Duplicated here (rather than importing the workflow package, which would
+// violate the runtime-isolation boundary driver-adjacent packages keep) as a
+// stable wire-format constant — like the "WorkflowStarted"/"SignalReceived"
+// event-type string literals below, changing it would break every already
+// -scheduled task job.
+func workflowTaskKindFmt(name string) string { return "$wf:" + name }
+
+// fakeSignalPayload mirrors workflow/signal.go's unexported
+// signalEventPayload wire format, for the same reason as workflowTaskKindFmt.
+type fakeSignalPayload struct {
+	Name    string          `json:"name"`
+	Payload json.RawMessage `json:"payload,omitempty"`
+}
+
 // StartWorkflow atomically inserts one workflow-as-code execution header,
 // deduplicating by (Name, BusinessIdempotencyKey) against live (running or
-// suspended) executions.
+// suspended) executions, and — for a newly inserted execution — records the
+// WorkflowStarted history event and schedules the first workflow-task job in
+// the same critical section, matching azyncpgx's single-transaction
+// contract: a caller never observes an execution with no history or task.
 func (f *Fake) StartWorkflow(_ context.Context, p driver.WorkflowStartParams) (bool, uuid.UUID, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
@@ -86,7 +106,7 @@ func (f *Fake) StartWorkflow(_ context.Context, p driver.WorkflowStartParams) (b
 	if taskQueue == "" {
 		taskQueue = "default"
 	}
-	f.executions[p.ID] = &fakeExecution{
+	e := &fakeExecution{
 		WorkflowExecutionView: driver.WorkflowExecutionView{
 			ID:                     p.ID,
 			Name:                   p.Name,
@@ -100,6 +120,11 @@ func (f *Fake) StartWorkflow(_ context.Context, p driver.WorkflowStartParams) (b
 			UpdatedAt:              now,
 		},
 	}
+	e.history = append(e.history, driver.HistoryEvent{
+		WorkflowID: p.ID, Seq: 1, Type: "WorkflowStarted", Payload: clonePayload(p.Input), CreatedAt: now,
+	})
+	f.executions[p.ID] = e
+	f.scheduleTaskLocked(p.ID, workflowTaskKindFmt(p.Name), time.Time{})
 	return true, uuid.Nil, nil
 }
 
@@ -117,12 +142,51 @@ func (f *Fake) GetWorkflowExecution(_ context.Context, id uuid.UUID) (driver.Wor
 
 // AppendHistory appends one durable history record with the next monotonic
 // sequence number for the workflow.
+// operationResultTypes are the two history event types
+// azync_workflow_history_exec_key_idx (migration 00007) dedupes by
+// execution_key, mirrored here so the fake matches the SQL driver's
+// idempotent AppendHistory.
+var operationResultTypes = map[string]bool{"OperationCompleted": true, "OperationFailed": true}
+
+// executionKeyFromPayload extracts the execution_key field from a history
+// payload, mirroring azyncpgx's helper of the same name.
+func executionKeyFromPayload(payload json.RawMessage) (string, bool) {
+	if len(payload) == 0 {
+		return "", false
+	}
+	var v struct {
+		//nolint:tagliatelle // durable wire format, must match workflow/operation.go
+		ExecutionKey string `json:"execution_key"`
+	}
+	if err := json.Unmarshal(payload, &v); err != nil || v.ExecutionKey == "" {
+		return "", false
+	}
+	return v.ExecutionKey, true
+}
+
+// AppendHistory appends one durable history record. For an
+// OperationCompleted/OperationFailed payload carrying an execution_key
+// already recorded, it is idempotent: it returns the existing record's seq
+// instead of appending a duplicate — closing the crash window between
+// AppendHistory and the operation job's Ack (processOperationJob).
 func (f *Fake) AppendHistory(_ context.Context, workflowID uuid.UUID, typ string, payload json.RawMessage) (int64, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	e := f.executions[workflowID]
 	if e == nil {
 		return 0, driver.NewNotFound("append history")
+	}
+	if operationResultTypes[typ] {
+		if key, ok := executionKeyFromPayload(payload); ok {
+			for _, ev := range e.history {
+				if ev.Type != typ {
+					continue
+				}
+				if existingKey, ok2 := executionKeyFromPayload(ev.Payload); ok2 && existingKey == key {
+					return ev.Seq, nil
+				}
+			}
+		}
 	}
 	var seq int64 = 1
 	if n := len(e.history); n > 0 {
@@ -157,10 +221,19 @@ func (f *Fake) ListHistory(_ context.Context, workflowID uuid.UUID) ([]driver.Hi
 // SignalWorkflow appends an early signal to the inbox, deduplicating by
 // (WorkflowID, Name, MessageID) when MessageID is set; an empty MessageID
 // disables dedupe, so every such Signal is a distinct message.
+// SignalWorkflow atomically appends the delivery to the inbox (deduped by
+// MessageID), the SignalReceived history record, and — when the execution is
+// not already terminal — a wake workflow-task job, in the same critical
+// section. Matches azyncpgx's single-transaction contract: a newly delivered
+// signal is never observed recorded without also being able to wake a
+// parked replay (the pre-fix race this closes: a crash between the inbox
+// insert and the wake-task schedule left a signal "delivered" with nothing
+// to ever act on it).
 func (f *Fake) SignalWorkflow(_ context.Context, p driver.SignalParams) (bool, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	if _, ok := f.executions[p.WorkflowID]; !ok {
+	e := f.executions[p.WorkflowID]
+	if e == nil {
 		return false, driver.NewNotFound("signal workflow")
 	}
 	if p.MessageID != "" {
@@ -169,6 +242,21 @@ func (f *Fake) SignalWorkflow(_ context.Context, p driver.SignalParams) (bool, e
 			return false, nil
 		}
 		f.signalKeys[key] = true
+	}
+
+	seq := int64(1)
+	if n := len(e.history); n > 0 {
+		seq = e.history[n-1].Seq + 1
+	}
+	payload, err := json.Marshal(fakeSignalPayload{Name: p.Name, Payload: p.Payload})
+	if err != nil {
+		return false, fmt.Errorf("drivertest: marshal signal payload: %w", err)
+	}
+	e.history = append(e.history, driver.HistoryEvent{
+		WorkflowID: p.WorkflowID, Seq: seq, Type: "SignalReceived", Payload: payload, CreatedAt: f.now(),
+	})
+	if !e.terminal() {
+		f.scheduleTaskLocked(p.WorkflowID, workflowTaskKindFmt(e.Name), time.Time{})
 	}
 	return true, nil
 }
@@ -390,7 +478,14 @@ func (f *Fake) ScheduleTask(_ context.Context, workflowID uuid.UUID, kind string
 	if _, ok := f.executions[workflowID]; !ok {
 		return driver.NewNotFound("schedule workflow task")
 	}
+	f.scheduleTaskLocked(workflowID, kind, runAt)
+	return nil
+}
 
+// scheduleTaskLocked is ScheduleTask's body, callable while f.mu is already
+// held — by StartWorkflow and SignalWorkflow, which bundle the first/wake
+// task atomically with their own effect (see their doc comments).
+func (f *Fake) scheduleTaskLocked(workflowID uuid.UUID, kind string, runAt time.Time) {
 	now := f.now()
 	if runAt.IsZero() {
 		runAt = now
@@ -416,7 +511,6 @@ func (f *Fake) ScheduleTask(_ context.Context, workflowID uuid.UUID, kind string
 	if state == driver.StatePending {
 		f.wake(driver.SourceWorkflow, kind)
 	}
-	return nil
 }
 
 // VacuumWorkflows deletes terminal workflow-as-code executions completed
@@ -451,4 +545,55 @@ func (f *Fake) WorkflowExecutionCount() int {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	return len(f.executions)
+}
+
+// ListStalledWorkflows returns up to limit running executions with no live
+// (pending, scheduled, active or uncertain) source=workflow job, updated
+// more than olderThan ago.
+func (f *Fake) ListStalledWorkflows(_ context.Context, olderThan time.Duration, limit int) ([]driver.StalledWorkflow, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if limit <= 0 {
+		limit = 100
+	}
+	cutoff := f.now().Add(-olderThan)
+	var out []driver.StalledWorkflow
+	for _, e := range f.executions {
+		if e.State != driver.WorkflowRunning || !e.UpdatedAt.Before(cutoff) {
+			continue
+		}
+		if f.hasLiveWorkflowJobLocked(e.ID) {
+			continue
+		}
+		out = append(out, driver.StalledWorkflow{ID: e.ID, Name: e.Name})
+	}
+	sort.Slice(out, func(i, j int) bool {
+		ei, ej := f.executions[out[i].ID], f.executions[out[j].ID]
+		if !ei.UpdatedAt.Equal(ej.UpdatedAt) {
+			return ei.UpdatedAt.Before(ej.UpdatedAt)
+		}
+		return out[i].ID.String() < out[j].ID.String()
+	})
+	if len(out) > limit {
+		out = out[:limit]
+	}
+	return out, nil
+}
+
+// hasLiveWorkflowJobLocked reports whether workflowID has any non-terminal
+// source=workflow job. Callers hold f.mu.
+func (f *Fake) hasLiveWorkflowJobLocked(workflowID uuid.UUID) bool {
+	for _, j := range f.jobs {
+		if j.Source != driver.SourceWorkflow || j.RunID != workflowID {
+			continue
+		}
+		switch j.State {
+		case driver.StatePending, driver.StateScheduled, driver.StateActive, driver.StateUncertain:
+			return true
+		case driver.StateDead, driver.StatePaused, driver.StateSucceeded,
+			driver.StateBlocked, driver.StateWaiting, driver.StateCancelled:
+			// terminal or otherwise not a live workflow-task/Operation state
+		}
+	}
+	return false
 }

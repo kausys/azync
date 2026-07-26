@@ -25,7 +25,7 @@ import (
 // defaultDSN matches the repo's compose.yml; override with DATABASE_URL.
 //
 //nolint:gosec // not a credential leak: matches compose.yml's dev-only DB
-const defaultDSN = "postgres://azync:azync@localhost:5432/azync?sslmode=disable"
+const defaultDSN = "postgres://azync:azync@localhost:5433/azync?sslmode=disable"
 
 // emailJob is a typed job argument: Kind is the wire-stable identity,
 // decoupled from this Go type's package path.

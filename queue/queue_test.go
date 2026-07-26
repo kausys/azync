@@ -143,3 +143,54 @@ func TestCloseOnSharedCoreLeavesCoreOpen(t *testing.T) {
 	_, err := r.Producer().Enqueue(context.Background(), testArgs{Value: "after-close"})
 	is.NoError(err)
 }
+
+// TestCloseWaitsForWorkerDrainOnOwnedCore proves Close does not close the
+// owned store out from under an in-flight handler: it waits for Worker.Start
+// to finish draining before releasing the store.
+func TestCloseWaitsForWorkerDrainOnOwnedCore(t *testing.T) {
+	t.Parallel()
+	is := require.New(t)
+	registerOpenTestDriver()
+
+	r, err := Open("azyncqueue-opentest://ignored", fastOptions()...)
+	is.NoError(err)
+
+	started := make(chan struct{}, 1)
+	release := make(chan struct{})
+	is.NoError(Register(r.Worker(), func(ctx context.Context, _ testArgs) error {
+		started <- struct{}{}
+		<-release
+		return nil
+	}))
+
+	ctx, cancel := context.WithCancel(context.Background())
+	startDone := make(chan error, 1)
+	go func() { startDone <- r.Worker().Start(ctx) }()
+
+	_, err = r.Producer().Enqueue(context.Background(), testArgs{Value: "x"})
+	is.NoError(err)
+
+	select {
+	case <-started:
+	case <-time.After(2 * time.Second):
+		t.Fatal("job did not start")
+	}
+
+	cancel()
+	go func() {
+		time.Sleep(150 * time.Millisecond)
+		close(release)
+	}()
+
+	closeStart := time.Now()
+	is.NoError(r.Close(context.Background()))
+	is.GreaterOrEqual(time.Since(closeStart), 150*time.Millisecond,
+		"Close must wait for the worker to finish draining before closing the store")
+
+	select {
+	case err := <-startDone:
+		is.NoError(err)
+	case <-time.After(time.Second):
+		t.Fatal("Worker.Start did not finish shortly after Close returned")
+	}
+}

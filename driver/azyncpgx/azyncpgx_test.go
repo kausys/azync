@@ -54,6 +54,15 @@ func TestNewDefaults(t *testing.T) {
 	assert.Equal(t, "azync", s.notifyChannel)
 	assert.Equal(t, "azync_migrations", s.migrationsTable)
 	assert.NotNil(t, s.logger)
+	assert.Equal(t, defaultStatsSlots, s.statsSlots)
+}
+
+func TestWithStatsSlots(t *testing.T) {
+	pool := newLazyPool(t)
+
+	assert.Equal(t, 32, New(pool, WithStatsSlots(32)).statsSlots, "a positive value overrides the default")
+	assert.Equal(t, defaultStatsSlots, New(pool, WithStatsSlots(0)).statsSlots, "zero is ignored, keeping the default")
+	assert.Equal(t, defaultStatsSlots, New(pool, WithStatsSlots(-1)).statsSlots, "a negative value is ignored, keeping the default")
 }
 
 func TestNewSchemaDefaultsChannel(t *testing.T) {

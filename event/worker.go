@@ -8,6 +8,7 @@ import (
 	"log/slog"
 	"maps"
 	"sync"
+	"time"
 
 	"github.com/kausys/azync/driver"
 	"github.com/kausys/azync/internal/engine"
@@ -30,6 +31,9 @@ type Worker struct {
 	started    bool
 	registered bool
 	subs       map[string]subRegistration
+
+	// now is the ledger retention clock; injectable in tests.
+	now func() time.Time
 }
 
 // subRegistration is one subscriber's in-memory registration: its name, its
@@ -113,6 +117,23 @@ func (w *Worker) resolveMaxAttempts(n int) int {
 // Polling-only workers become ready immediately after Start.
 func (w *Worker) Ready() <-chan struct{} { return w.engine.Ready() }
 
+// Wait blocks until a Start call has returned, or ctx ends first, whichever
+// comes first. If Start was never called, Wait returns immediately (there is
+// nothing to wait for). Close uses Wait to avoid closing a shared store out
+// from under an in-flight drain; callers coordinating their own shutdown
+// (stop ctx, then Wait, then release other resources) should do the same.
+func (w *Worker) Wait(ctx context.Context) error {
+	if !w.engine.Started() {
+		return nil
+	}
+	select {
+	case <-w.engine.Done():
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+}
+
 // Start upserts every subscriber's durable subscriptions, registers one engine
 // kind per subscriber, and runs the engine (fetch, execute, settle, maintenance)
 // until ctx is cancelled. The durable upsert runs before the engine starts, so
@@ -147,6 +168,8 @@ func (w *Worker) Start(ctx context.Context) error {
 		}
 	}
 
+	w.warnOnSubscriberDrift(ctx, subs)
+
 	// Kinds survive a failed setup on the engine, so register them exactly once
 	// even across Start retries.
 	if !registered {
@@ -167,12 +190,93 @@ func (w *Worker) Start(ctx context.Context) error {
 		w.mu.Unlock()
 	}
 
+	retentionCtx, cancelRetention := context.WithCancel(ctx)
+	defer cancelRetention()
+	var retentionLoops sync.WaitGroup
+	if w.cfg.ledgerRetention > 0 {
+		retentionLoops.Go(func() { w.retentionLoop(retentionCtx) })
+	}
+
 	err := w.engine.Start(ctx)
+	cancelRetention()
+	retentionLoops.Wait()
 	if err != nil && !w.engine.Started() {
 		// The engine failed during setup and reset itself; allow a retry here too.
 		w.reset()
 	}
 	return err
+}
+
+// retentionLoop periodically trims ledger events older than
+// cfg.ledgerRetention whose deliveries have all reached a terminal state
+// (driver.Store.Retain); events with any pending delivery are left alone and
+// picked up on a later sweep once they settle. Each tick removes in bounded
+// batches so a large backlog does not become one unbounded delete.
+func (w *Worker) retentionLoop(ctx context.Context) {
+	ticker := time.NewTicker(w.cfg.retentionInterval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			w.retainOnce(ctx)
+		}
+	}
+}
+
+func (w *Worker) retainOnce(ctx context.Context) {
+	before := w.now().Add(-w.cfg.ledgerRetention)
+	var total int64
+	for {
+		n, err := w.store.Retain(ctx, before, retainBatch)
+		if err != nil {
+			if ctx.Err() == nil {
+				w.logger.Error("ledger retention failed", "error", err)
+			}
+			return
+		}
+		total += n
+		if n < retainBatch {
+			break
+		}
+	}
+	if total > 0 {
+		w.logger.Debug("ledger retention removed events", "count", total)
+	}
+}
+
+// warnOnSubscriberDrift compares the durable subscription set against subs
+// (the locally registered subscribers) and logs one warning per durably
+// registered subscriber name that has no local registration at all.
+//
+// This is deliberately warn-only, not an error: a deployment may legitimately
+// split subscribers across multiple worker processes, each registering only
+// its own subset, so a name being "durable but not local to this process" is
+// not on its own a mistake. It is the signal an operator needs for the
+// mistake it also catches — a subscriber retired in code but never deleted
+// (Worker.Register's doc note) — whose deliveries pile up forever and also
+// block Manager.Retain, since Retain skips any event with a non-terminal
+// delivery.
+func (w *Worker) warnOnSubscriberDrift(ctx context.Context, subs map[string]subRegistration) {
+	views, err := w.store.ListSubscriberViews(ctx, "")
+	if err != nil {
+		// Non-fatal: this is diagnostic only, never worth failing Start over.
+		w.logger.Warn("could not check for subscriber drift", "error", err)
+		return
+	}
+	warned := map[string]bool{}
+	for _, v := range views {
+		if _, ok := subs[v.Subscriber]; ok || warned[v.Subscriber] {
+			continue
+		}
+		warned[v.Subscriber] = true
+		w.logger.Warn(
+			"durable subscription has no registered subscriber on this worker; "+
+				"its deliveries will accumulate and block ledger retention unless "+
+				"another process registers it, or it is removed with Manager.DeleteSubscription",
+			"subscriber", v.Subscriber)
+	}
 }
 
 // reset clears the started flag after a setup failure so Start can be retried.

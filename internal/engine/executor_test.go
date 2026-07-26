@@ -13,6 +13,7 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/stretchr/testify/require"
+	"go.opentelemetry.io/otel/trace"
 )
 
 // discardLogger keeps test output pristine.
@@ -68,6 +69,42 @@ func getJob(t *testing.T, f *drivertest.Fake, id uuid.UUID) driver.Job {
 
 func retryClassifier(o Outcome) Classifier {
 	return func(error) Outcome { return o }
+}
+
+// TestExecuteExtractsTraceContextFromJobMeta proves execute wires the
+// producer's trace context (carried in job.Meta by InjectTraceContext) into
+// the handler's ctx, so the handler's own spans become children of the
+// producer's span rather than disconnected roots.
+func TestExecuteExtractsTraceContextFromJobMeta(t *testing.T) {
+	t.Parallel()
+	is := require.New(t)
+	f := drivertest.NewFake()
+	e := newTestEngine(f, testSettings())
+
+	producerCtx := withValidSpanContext(context.Background())
+	meta := InjectTraceContext(producerCtx, nil)
+	is.Contains(meta, "traceparent")
+
+	ctx := context.Background()
+	id := uuid.New()
+	_, err := f.Enqueue(ctx, driver.EnqueueParams{
+		ID: id, Kind: "traced", Payload: json.RawMessage(`{}`), Meta: meta,
+		MaxAttempts: 3, MaxAttemptsExplicit: true,
+	})
+	is.NoError(err)
+	jobs, err := f.DequeueBatch(ctx, driver.SourceQueue, driver.DequeueParams{Kind: "traced", Limit: 1, Lease: time.Minute})
+	is.NoError(err)
+	is.Len(jobs, 1)
+
+	var sawTraceID trace.TraceID
+	k := Kind{Name: "traced", Concurrency: 1, Handler: func(ctx context.Context, _ driver.Job) (json.RawMessage, error) {
+		sawTraceID = trace.SpanContextFromContext(ctx).TraceID()
+		return nil, nil
+	}}
+	e.execute(context.Background(), k, jobs[0], func() {})
+
+	is.Equal(trace.SpanContextFromContext(producerCtx).TraceID(), sawTraceID,
+		"the handler's ctx must carry the producer's trace ID")
 }
 
 func TestExecuteSuccessAcksAndRetainsSucceeded(t *testing.T) {

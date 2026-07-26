@@ -184,7 +184,59 @@ func TestCronOccurrenceDedupeAcrossSkewedLeaders(t *testing.T) {
 		"the same occurrence enqueued by two leaders must produce exactly one job")
 }
 
-func TestCronDisabledWithoutLeaderElector(t *testing.T) {
+func TestRegisterCronRejectsIdempotencyOptions(t *testing.T) {
+	t.Parallel()
+	is := require.New(t)
+	r := newTestRuntime(t, drivertest.NewFake())
+
+	err := r.Worker().RegisterCron("nightly", "0 3 * * *", cronArgs{}, IdempotencyKey("custom"))
+	is.Error(err)
+	is.Contains(err.Error(), "reserved for the occurrence key")
+
+	err = r.Worker().RegisterCron("nightly2", "0 3 * * *", cronArgs{}, IdempotencyKeyTTL("custom", time.Hour))
+	is.Error(err)
+	is.Contains(err.Error(), "reserved for the occurrence key")
+}
+
+// TestCronReacquiresAfterLeadershipLostWithoutSkippingOccurrence proves the
+// loop detects an invalidated lease (simulating a dropped session), releases
+// and re-acquires it, and that an occurrence which fell inside that
+// failover window is not skipped: resuming from the stored e.next rather
+// than recomputing schedule.Next(now) on re-acquisition.
+func TestCronReacquiresAfterLeadershipLostWithoutSkippingOccurrence(t *testing.T) {
+	t.Parallel()
+	is := require.New(t)
+	f := drivertest.NewFake()
+	clk := drivertest.NewManualClock(time.Date(2026, 7, 22, 12, 0, 30, 0, time.UTC))
+	r := cronRuntime(t, f, clk)
+	is.NoError(r.Worker().RegisterCron("minutely", "* * * * *", cronArgs{Tag: "m"}))
+
+	runCronLoop(t, r.Worker(), f)
+	awaitCronLeader(t, f)
+
+	// Invalidate leadership shortly before the next occurrence comes due,
+	// without an explicit release: the in-memory lock stays held (as a real
+	// advisory lock would appear to, briefly, from another instance's view),
+	// but this loop's own Valid check must now report the loss.
+	clk.Set(time.Date(2026, 7, 22, 12, 0, 59, 0, time.UTC))
+	f.InvalidateLeadership(cronLeadershipName)
+
+	// The occurrence at 12:01:00 falls inside the demote/re-acquire window;
+	// the loop must still fire it exactly once after regaining leadership.
+	clk.Set(time.Date(2026, 7, 22, 12, 1, 5, 0, time.UTC))
+	is.Eventually(func() bool {
+		return countJobs(t, f, "queue.cron") == 1
+	}, 2*time.Second, 2*time.Millisecond, "occurrence inside the failover window must not be skipped")
+	time.Sleep(30 * time.Millisecond) // several more ticks: still exactly one
+	is.Equal(int64(1), countJobs(t, f, "queue.cron"))
+}
+
+// TestStartFailsWithoutLeaderElectorWhenCronRegistered proves Start refuses to
+// run at all when cron schedules are registered but the driver cannot elect a
+// leader: running cron unelected would fire every occurrence once per
+// process instead of once per cluster, so this must be a loud failure, not a
+// silently-degraded worker.
+func TestStartFailsWithoutLeaderElectorWhenCronRegistered(t *testing.T) {
 	t.Parallel()
 	is := require.New(t)
 	f := drivertest.NewFake()
@@ -193,6 +245,25 @@ func TestCronDisabledWithoutLeaderElector(t *testing.T) {
 	r, err := New(core, append(fastOptions(), WithCron(true), WithCronTick(5*time.Millisecond))...)
 	is.NoError(err)
 	is.NoError(r.Worker().RegisterCron("minutely", "* * * * *", cronArgs{}))
+
+	err = r.Worker().Start(context.Background())
+	is.Error(err)
+	is.Contains(err.Error(), "leader-election")
+	is.Contains(err.Error(), "WithCron(false)")
+}
+
+// TestWithCronFalseRunsWithoutLeaderElector proves WithCron(false) sidesteps
+// the leader-election requirement entirely: normal jobs keep flowing on a
+// driver with no leader-election capability, as long as no cron schedule
+// tries to run there.
+func TestWithCronFalseRunsWithoutLeaderElector(t *testing.T) {
+	t.Parallel()
+	is := require.New(t)
+	f := drivertest.NewFake()
+	core, err := azyncNew(storeOnly{Store: f}) // masks LeaderElector (and Notifier)
+	is.NoError(err)
+	r, err := New(core, append(fastOptions(), WithCron(false))...)
+	is.NoError(err)
 
 	done := make(chan struct{}, 1)
 	is.NoError(Register(r.Worker(), func(context.Context, testArgs) error {
@@ -203,7 +274,6 @@ func TestCronDisabledWithoutLeaderElector(t *testing.T) {
 	startWorker(t, r.Worker())
 	awaitReady(t, r.Worker())
 
-	// Cron silently disabled (a warning is logged); normal jobs keep flowing.
 	_, err = r.Producer().Enqueue(context.Background(), testArgs{Value: "x"})
 	is.NoError(err)
 	select {
@@ -211,7 +281,6 @@ func TestCronDisabledWithoutLeaderElector(t *testing.T) {
 	case <-time.After(2 * time.Second):
 		t.Fatal("worker without leader election stopped processing jobs")
 	}
-	is.Zero(countJobs(t, f, "queue.cron"))
 }
 
 func TestWithCronFalseNeverTakesLeadership(t *testing.T) {

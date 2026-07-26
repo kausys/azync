@@ -45,21 +45,29 @@ func (f statField) column() string {
 }
 
 // bumpStat increments one daily counter for (source, kind). The row is sharded
-// by a random slot (0..7) so concurrent business transactions do not serialize
-// on a single hot (source, kind, day) row; readers SUM across slots. It runs on
-// the caller's querier so the bump commits atomically with the operation.
+// by a random slot (0..StatsSlots-1) so concurrent business transactions do
+// not serialize on a single hot (source, kind, day) row; readers SUM across
+// slots. It runs on the caller's querier so the bump commits atomically with
+// the operation. Used for the maintenance paths that touch many (source,
+// kind) pairs at once (reap, dag); the single-job settlement paths
+// (Ack/Reschedule/Dead) fuse their own bump into one statement instead — see
+// ackSQL/rescheduleSQL/deadSQL.
 func (s *Store) bumpStat(ctx context.Context, q querier, source driver.Source, kind string, field statField, n int64) error {
 	column := field.column()
 	//nolint:gosec // column is one of four hardcoded counter names, never user input
 	sql := fmt.Sprintf(`INSERT INTO azync_stats_daily (source, kind, day, slot, %[1]s)
 		VALUES ($1, $2, CURRENT_DATE, $3, $4)
 		ON CONFLICT (source, kind, day, slot) DO UPDATE SET %[1]s = azync_stats_daily.%[1]s + EXCLUDED.%[1]s`, column)
-	//nolint:gosec // G404: slot only spreads write contention; it is not security-sensitive
-	slot := rand.IntN(8)
-	if _, err := q.Exec(ctx, sql, string(source), kind, slot, n); err != nil {
+	if _, err := q.Exec(ctx, sql, string(source), kind, s.randSlot(), n); err != nil {
 		return fmt.Errorf("azyncpgx: bump stat %s: %w", column, err)
 	}
 	return nil
+}
+
+// randSlot picks a random stats shard in [0, StatsSlots).
+func (s *Store) randSlot() int {
+	//nolint:gosec // G404: slot only spreads write contention; it is not security-sensitive
+	return rand.IntN(s.statsSlots)
 }
 
 // ---- producer -------------------------------------------------------------
@@ -89,31 +97,42 @@ ON CONFLICT (source, kind, idempotency_key)
 DO NOTHING
 RETURNING id`
 
-// Enqueue durably inserts one queue job in its own short transaction and signals
-// workers after commit.
+// Enqueue durably inserts one queue job in its own short transaction and
+// signals workers with a best-effort notify after commit (see
+// notifyAfterCommit): a slow or failing notify can never abort the enqueue.
 func (s *Store) Enqueue(ctx context.Context, p driver.EnqueueParams) (bool, error) {
 	tx, err := s.pool.Begin(ctx)
 	if err != nil {
 		return false, fmt.Errorf("azyncpgx: enqueue begin: %w", err)
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
-	inserted, err := s.enqueue(ctx, tx, p)
+	inserted, err := s.enqueue(ctx, tx, p, false)
 	if err != nil {
 		return false, err
 	}
 	if err := tx.Commit(ctx); err != nil {
 		return false, fmt.Errorf("azyncpgx: enqueue commit: %w", err)
 	}
+	if inserted {
+		s.notifyAfterCommit(driver.SourceQueue, p.Kind) //nolint:contextcheck // deliberately independent of ctx, see notifyAfterCommit doc
+	}
 	return inserted, nil
 }
 
 // EnqueueTx performs Enqueue within the caller's transaction so the outbox
-// commits atomically with the caller's own writes.
+// commits atomically with the caller's own writes. The notify stays inside
+// the caller's transaction here — that is the outbox contract: a wakeup is
+// only ever sent if the caller's own transaction commits, and Postgres fires
+// it exactly on that commit.
 func (s *Store) EnqueueTx(ctx context.Context, tx pgx.Tx, p driver.EnqueueParams) (bool, error) {
-	return s.enqueue(ctx, tx, p)
+	return s.enqueue(ctx, tx, p, true)
 }
 
-func (s *Store) enqueue(ctx context.Context, q querier, p driver.EnqueueParams) (bool, error) {
+// enqueue inserts the job. notifyInTx selects which of the two outbox
+// contracts above applies: true fires the notify inside q (EnqueueTx's own
+// transaction); false leaves it to the caller to notify post-commit
+// (Enqueue).
+func (s *Store) enqueue(ctx context.Context, q querier, p driver.EnqueueParams, notifyInTx bool) (bool, error) {
 	metaJSON, err := json.Marshal(orEmptyMeta(p.Meta))
 	if err != nil {
 		return false, fmt.Errorf("azyncpgx: marshal meta: %w", err)
@@ -153,9 +172,10 @@ func (s *Store) enqueue(ctx context.Context, q querier, p driver.EnqueueParams) 
 	if err := s.bumpStat(ctx, q, driver.SourceQueue, p.Kind, statEnqueued, 1); err != nil {
 		return false, err
 	}
-	// Outbox: NOTIFY inside the transaction fires only after commit.
-	if _, err := q.Exec(ctx, `SELECT pg_notify($1, $2)`, s.notifyChannel, notifyPayload(driver.SourceQueue, p.Kind)); err != nil {
-		return false, fmt.Errorf("azyncpgx: enqueue notify: %w", err)
+	if notifyInTx {
+		if _, err := q.Exec(ctx, `SELECT pg_notify($1, $2)`, s.notifyChannel, notifyPayload(driver.SourceQueue, p.Kind)); err != nil {
+			return false, fmt.Errorf("azyncpgx: enqueue notify: %w", err)
+		}
 	}
 	return true, nil
 }
@@ -246,41 +266,44 @@ func (s *Store) dequeueEvents(ctx context.Context, p driver.DequeueParams) ([]dr
 
 // ---- settlement (lease-token fenced) --------------------------------------
 
+// ackSQL settles the job and bumps its daily 'processed' counter in one
+// statement (one implicit, single-statement transaction) instead of an
+// explicit BEGIN/UPDATE/INSERT/COMMIT round trip: the bump CTE runs only for
+// the row(s) upd actually produced, so a fencing miss (zero rows) bumps
+// nothing.
 const ackSQL = `
-UPDATE azync_jobs
-SET state = 'succeeded', lease_until = NULL, lease_token = NULL, completed_at = now(), updated_at = now()
-WHERE id = $1 AND state = 'active' AND lease_token = $2
-RETURNING source, kind`
+WITH upd AS (
+	UPDATE azync_jobs
+	SET state = 'succeeded', lease_until = NULL, lease_token = NULL, completed_at = now(), updated_at = now()
+	WHERE id = $1 AND state = 'active' AND lease_token = $2
+	RETURNING source, kind
+),
+bump AS (
+	INSERT INTO azync_stats_daily (source, kind, day, slot, processed)
+	SELECT source, kind, CURRENT_DATE, $3, 1 FROM upd
+	ON CONFLICT (source, kind, day, slot) DO UPDATE SET processed = azync_stats_daily.processed + 1
+)
+SELECT source, kind FROM upd`
 
 // Ack completes an active job, retaining it as StateSucceeded. Clearing the
 // lease and the partial idempotency index excluding 'succeeded' frees the
 // live-job idempotency key exactly as a delete would.
 func (s *Store) Ack(ctx context.Context, id, leaseToken uuid.UUID) error {
-	tx, err := s.pool.Begin(ctx)
-	if err != nil {
-		return fmt.Errorf("azyncpgx: ack begin: %w", err)
-	}
-	defer func() { _ = tx.Rollback(ctx) }()
 	var source, kind string
-	err = tx.QueryRow(ctx, ackSQL, id, leaseToken).Scan(&source, &kind)
+	err := s.pool.QueryRow(ctx, ackSQL, id, leaseToken, s.randSlot()).Scan(&source, &kind)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return driver.NewNotFound("ack")
 	}
 	if err != nil {
 		return fmt.Errorf("azyncpgx: ack: %w", err)
 	}
-	if err := s.bumpStat(ctx, tx, driver.Source(source), kind, statProcessed, 1); err != nil {
-		return err
-	}
-	if err := tx.Commit(ctx); err != nil {
-		return fmt.Errorf("azyncpgx: ack commit: %w", err)
-	}
 	return nil
 }
 
-// rescheduleSQL records the failed attempt atomically with the transition: the
-// UPDATE's RETURNING feeds the attempts INSERT, so a row is written only if the
-// fenced transition actually applied.
+// rescheduleSQL records the failed attempt and bumps the daily 'failed'
+// counter atomically with the transition, all in one statement: each CTE's
+// RETURNING/SELECT chains off upd, so a fencing miss (zero rows) writes
+// nothing anywhere.
 const rescheduleSQL = `
 WITH upd AS (
 	UPDATE azync_jobs SET
@@ -293,6 +316,11 @@ WITH upd AS (
 ins AS (
 	INSERT INTO azync_job_attempts (job_id, attempt, error)
 	SELECT id, attempt, $4 FROM upd
+),
+bump AS (
+	INSERT INTO azync_stats_daily (source, kind, day, slot, failed)
+	SELECT source, kind, CURRENT_DATE, $5, 1 FROM upd
+	ON CONFLICT (source, kind, day, slot) DO UPDATE SET failed = azync_stats_daily.failed + 1
 )
 SELECT source, kind FROM upd`
 
@@ -312,6 +340,11 @@ WITH upd AS (
 ins AS (
 	INSERT INTO azync_job_attempts (job_id, attempt, error)
 	SELECT id, attempt, $3 FROM upd
+),
+bump AS (
+	INSERT INTO azync_stats_daily (source, kind, day, slot, failed)
+	SELECT source, kind, CURRENT_DATE, $4, 1 FROM upd
+	ON CONFLICT (source, kind, day, slot) DO UPDATE SET failed = azync_stats_daily.failed + 1
 )
 SELECT source, kind FROM upd`
 
@@ -320,27 +353,17 @@ func (s *Store) Dead(ctx context.Context, id, leaseToken uuid.UUID, lastError st
 	return s.failTransition(ctx, "dead", deadSQL, id, leaseToken, lastError)
 }
 
-// failTransition runs a fenced state change that counts as a failure and bumps
-// the daily 'failed' counter for the returned (source, kind) in the same tx.
+// failTransition runs a fenced state change that counts as a failure,
+// appending the caller's own randomly chosen stats slot so the statement's
+// fused stats bump (see rescheduleSQL/deadSQL) lands on it.
 func (s *Store) failTransition(ctx context.Context, op, sql string, args ...any) error {
-	tx, err := s.pool.Begin(ctx)
-	if err != nil {
-		return fmt.Errorf("azyncpgx: %s begin: %w", op, err)
-	}
-	defer func() { _ = tx.Rollback(ctx) }()
 	var source, kind string
-	err = tx.QueryRow(ctx, sql, args...).Scan(&source, &kind)
+	err := s.pool.QueryRow(ctx, sql, append(args, s.randSlot())...).Scan(&source, &kind)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return driver.NewNotFound(op)
 	}
 	if err != nil {
 		return fmt.Errorf("azyncpgx: %s: %w", op, err)
-	}
-	if err := s.bumpStat(ctx, tx, driver.Source(source), kind, statFailed, 1); err != nil {
-		return err
-	}
-	if err := tx.Commit(ctx); err != nil {
-		return fmt.Errorf("azyncpgx: %s commit: %w", op, err)
 	}
 	return nil
 }
@@ -579,6 +602,27 @@ func decodeMeta(raw string) (map[string]string, error) {
 
 func notifyPayload(source driver.Source, kind string) string {
 	return string(source) + ":" + kind
+}
+
+// notifyTimeout bounds a post-commit notify so a stuck pool acquire or a slow
+// backend cannot hang the caller indefinitely; NOTIFY itself is normally
+// near-instant.
+const notifyTimeout = 2 * time.Second
+
+// notifyAfterCommit fires a best-effort wakeup after the caller's own
+// transaction has already committed. Running it outside that transaction
+// (rather than NOTIFY-inside-tx, fired only on commit by Postgres itself)
+// means a slow or failing notify can never abort or add lock time to the
+// caller's write. Wakeups are lossy by contract — driver.Notifier's polling
+// fallback is the correctness path — so a failure here only delays pickup by
+// one poll interval; it is logged, not returned.
+func (s *Store) notifyAfterCommit(source driver.Source, kind string) {
+	ctx, cancel := context.WithTimeout(context.Background(), notifyTimeout)
+	defer cancel()
+	if _, err := s.pool.Exec(ctx, `SELECT pg_notify($1, $2)`, s.notifyChannel, notifyPayload(source, kind)); err != nil {
+		s.logger.Warn("post-commit notify failed; workers will still pick this up by polling",
+			"source", string(source), "kind", kind, "error", err)
+	}
 }
 
 // toUUID converts a pgtype.UUID to a uuid.UUID, mapping SQL NULL to uuid.Nil.

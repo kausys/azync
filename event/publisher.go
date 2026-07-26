@@ -9,9 +9,15 @@ import (
 	"time"
 
 	"github.com/kausys/azync/driver"
+	"github.com/kausys/azync/internal/engine"
 
 	"github.com/google/uuid"
+	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/trace"
 )
+
+// instrumentationName is this package's OpenTelemetry instrumentation scope.
+const instrumentationName = "github.com/kausys/azync/event"
 
 // Publisher appends events to the durable ledger and registers subscribers.
 // Publish atomically snapshots the subscribers matching an event and fans out
@@ -41,9 +47,20 @@ func (p *Publisher) Register(ctx context.Context, subscription Subscription) err
 }
 
 // Publish appends an event to the ledger. The backend selects the matching
-// subscriber snapshot and creates the initial deliveries in one transaction; it
-// returns the new event's id.
+// subscriber snapshot and creates the initial deliveries in one transaction;
+// it returns the new event's id. A producer span wraps the call
+// (SpanKindProducer), and ctx's trace context (if any) travels with the
+// event via Meta so every fanned-out delivery's consumer span becomes its
+// child (see engine.ExtractTraceContext).
 func (p *Publisher) Publish(ctx context.Context, args EventArgs, opts ...PublishOption) (uuid.UUID, error) {
+	eventType := ""
+	if args != nil {
+		eventType = args.EventType()
+	}
+	ctx, span := otel.Tracer(instrumentationName).Start(ctx, "event.publish "+eventType,
+		trace.WithSpanKind(trace.SpanKindProducer))
+	defer span.End()
+
 	params, err := p.makeParams(ctx, args, opts...)
 	if err != nil {
 		return uuid.Nil, err
@@ -54,7 +71,7 @@ func (p *Publisher) Publish(ctx context.Context, args EventArgs, opts ...Publish
 	return params.ID, nil
 }
 
-func (p *Publisher) makeParams(_ context.Context, args EventArgs, opts ...PublishOption) (driver.PublishParams, error) {
+func (p *Publisher) makeParams(ctx context.Context, args EventArgs, opts ...PublishOption) (driver.PublishParams, error) {
 	if args == nil || args.EventType() == "" {
 		return driver.PublishParams{}, errors.New("event: event type is required")
 	}
@@ -74,7 +91,7 @@ func (p *Publisher) makeParams(_ context.Context, args EventArgs, opts ...Publis
 		Version:       o.version,
 		OccurredAt:    time.Now().UTC(),
 		Payload:       payload,
-		Meta:          o.meta,
+		Meta:          engine.InjectTraceContext(ctx, o.meta),
 	}, nil
 }
 
