@@ -1,5 +1,21 @@
 # Changelog
 
+## [0.0.6](https://github.com/kausys/azync/compare/v0.0.5...v0.0.6) (2026-07-27)
+
+
+### ⚠ BREAKING CHANGES
+
+* driver.Store.Snooze returns (deadlined, error) and takes a deadline reason; DAGStore.Signal takes DAGSignalParams and returns (delivered, deduplicated, error); DAGStore gains DeliverBufferedSignals, PauseDAG and FindDAGByKey; driver.Store gains Skip and RunNow; driver.TaskResults returns map[string]TaskResult (carries Skipped); dag.ErrNoSignalMatched is removed (a buffered signal is not an error); JobState gains 'skipped' and DAGState gains 'paused'; RetryDAG also releases paused tasks and clears stamped snooze deadlines.
+
+### Features
+
+* bounded NotReady, durable DAG signals and operator verbs from the first production consumer ([8fa7382](https://github.com/kausys/azync/commit/8fa73827b6851fb2cdcc721836b29e944144a949))
+
+
+### Bug Fixes
+
+* harden 00009 against interrupted builds and pin rolling-deploy arbiter inference ([a369441](https://github.com/kausys/azync/commit/a369441d8dccca0255ec94d39dc9f731642fa9a1))
+
 ## [0.0.5](https://github.com/kausys/azync/compare/v0.0.4...v0.0.5) (2026-07-26)
 
 
