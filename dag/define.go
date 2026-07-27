@@ -53,6 +53,7 @@ type taskDecl struct {
 	compensate     TaskArgs
 	maxRetries     int
 	ignoreDeadDeps bool
+	deadline       time.Duration
 }
 
 // DefineOption customizes a Definition.
@@ -112,6 +113,24 @@ func MaxRetries(n int) TaskOption {
 // a dead task with no dependents always triggers the policy.
 func IgnoreDeadDeps() TaskOption {
 	return func(t *taskDecl) { t.ignoreDeadDeps = true }
+}
+
+// Deadline bounds the task's NotReady loop: once d has elapsed since the
+// task FIRST reported NotReady (backend clock — the budget measures time
+// spent waiting for the resource, not the workflow's age), the next NotReady
+// escalates the task to dead instead of re-polling, triggering the
+// workflow's OnFailure policy. It does not bound ordinary retries or a task
+// that never snoozes — the retry budget governs those — so time spent
+// failing and backing off never consumes it. Manager.Retry clears the
+// stamped deadline: a retried or unpaused task waits with a fresh budget.
+// Only meaningful on handler tasks that poll with NotReady; d <= 0 is
+// ignored (no deadline).
+func Deadline(d time.Duration) TaskOption {
+	return func(t *taskDecl) {
+		if d > 0 {
+			t.deadline = d
+		}
+	}
 }
 
 // Define starts a workflow definition. Add tasks with Task, Sleep and

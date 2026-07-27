@@ -353,6 +353,30 @@ func (s *Store) Dead(ctx context.Context, id, leaseToken uuid.UUID, lastError st
 	return s.failTransition(ctx, "dead", deadSQL, id, leaseToken, lastError)
 }
 
+// skipSQL settles a deliberate no-op: terminal skipped, the reason retained
+// as last_error for the ops surfaces, counted as processed (the task
+// completed — it just had nothing to do), no attempts row (nothing failed).
+const skipSQL = `
+WITH upd AS (
+	UPDATE azync_jobs SET
+		state = 'skipped', lease_until = NULL, lease_token = NULL,
+		last_error = $3, completed_at = now(), updated_at = now()
+	WHERE id = $1 AND state = 'active' AND lease_token = $2
+	RETURNING source, kind
+),
+bump AS (
+	INSERT INTO azync_stats_daily (source, kind, day, slot, processed)
+	SELECT source, kind, CURRENT_DATE, $4, 1 FROM upd
+	ON CONFLICT (source, kind, day, slot) DO UPDATE SET processed = azync_stats_daily.processed + 1
+)
+SELECT source, kind FROM upd`
+
+// Skip settles an active job as StateSkipped with the reason retained.
+// Fenced by lease token.
+func (s *Store) Skip(ctx context.Context, id, leaseToken uuid.UUID, reason string) error {
+	return s.failTransition(ctx, "skip", skipSQL, id, leaseToken, reason)
+}
+
 // failTransition runs a fenced state change that counts as a failure,
 // appending the caller's own randomly chosen stats slot so the statement's
 // fused stats bump (see rescheduleSQL/deadSQL) lands on it.
@@ -383,18 +407,58 @@ func (s *Store) Release(ctx context.Context, id, leaseToken uuid.UUID) error {
 // snoozeSQL implements the polling-wait primitive: back to scheduled on the
 // backend clock, handing back the attempt this lease charged (floored at zero)
 // so snoozing never consumes the retry budget, with no attempts row.
+//
+// The snooze budget is enforced here, atomically, on the backend clock: the
+// first snooze of a budgeted job stamps deadline_at (SET clauses read
+// pre-update values, so the stamping snooze itself never escalates), and a
+// snooze settled past a stamped deadline dead-letters the job instead —
+// recording the final attempt and bumping the 'failed' stat exactly like
+// deadSQL, fused so a fencing miss writes nothing anywhere.
 const snoozeSQL = `
-UPDATE azync_jobs SET
-	state = 'scheduled', run_at = now() + make_interval(secs => $3),
-	attempt = GREATEST(attempt - 1, 0),
-	lease_until = NULL, lease_token = NULL, updated_at = now()
-WHERE id = $1 AND state = 'active' AND lease_token = $2`
+WITH upd AS (
+	UPDATE azync_jobs SET
+		state = CASE WHEN deadline_at IS NOT NULL AND now() >= deadline_at
+			THEN 'dead' ELSE 'scheduled' END,
+		run_at = CASE WHEN deadline_at IS NOT NULL AND now() >= deadline_at
+			THEN run_at ELSE now() + make_interval(secs => $3) END,
+		attempt = CASE WHEN deadline_at IS NOT NULL AND now() >= deadline_at
+			THEN attempt ELSE GREATEST(attempt - 1, 0) END,
+		last_error = CASE WHEN deadline_at IS NOT NULL AND now() >= deadline_at
+			THEN $4 ELSE last_error END,
+		failed_at = CASE WHEN deadline_at IS NOT NULL AND now() >= deadline_at
+			THEN now() ELSE failed_at END,
+		deadline_at = COALESCE(deadline_at, CASE WHEN snooze_budget IS NOT NULL
+			THEN now() + make_interval(secs => snooze_budget) END),
+		lease_until = NULL, lease_token = NULL, updated_at = now()
+	WHERE id = $1 AND state = 'active' AND lease_token = $2
+	RETURNING id, source, kind, attempt, (state = 'dead') AS deadlined
+),
+ins AS (
+	INSERT INTO azync_job_attempts (job_id, attempt, error)
+	SELECT id, attempt, $4 FROM upd WHERE deadlined
+),
+bump AS (
+	INSERT INTO azync_stats_daily (source, kind, day, slot, failed)
+	SELECT source, kind, CURRENT_DATE, $5, 1 FROM upd WHERE deadlined
+	ON CONFLICT (source, kind, day, slot) DO UPDATE SET failed = azync_stats_daily.failed + 1
+)
+SELECT deadlined FROM upd`
 
 // Snooze parks an active job as StateScheduled with run_at now()+delay without
-// consuming the retry budget and without recording an attempt. Fenced by lease
-// token.
-func (s *Store) Snooze(ctx context.Context, id, leaseToken uuid.UUID, delay time.Duration) error {
-	return s.requireRow(ctx, "snooze", snoozeSQL, id, leaseToken, delay.Seconds())
+// consuming the retry budget and without recording an attempt — unless the
+// job's stamped snooze deadline has passed, in which case it dead-letters the
+// job atomically (deadlined=true) with deadlineError as its final attempt.
+// Fenced by lease token.
+func (s *Store) Snooze(ctx context.Context, id, leaseToken uuid.UUID, delay time.Duration, deadlineError string) (bool, error) {
+	var deadlined bool
+	err := s.pool.QueryRow(ctx, snoozeSQL, id, leaseToken, delay.Seconds(), deadlineError, s.randSlot()).Scan(&deadlined)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return false, driver.NewNotFound("snooze")
+	}
+	if err != nil {
+		return false, fmt.Errorf("azyncpgx: snooze: %w", err)
+	}
+	return deadlined, nil
 }
 
 const extendLeaseSQL = `
@@ -431,7 +495,8 @@ func jobColumns(alias string) string {
 		a + `run_at, ` + a + `lease_until, ` + a + `lease_token, COALESCE(` + a + `last_error, ''), ` +
 		a + `event_id, ` + a + `replay, ` + a + `enqueued_at, ` + a + `failed_at, ` + a + `completed_at, ` +
 		a + `dag_id, ` + a + `run_id, COALESCE(` + a + `task_key, ''), ` + a + `result::text, ` +
-		`COALESCE(` + a + `signal_name, ''), COALESCE(` + a + `compensation_kind, ''), ` + a + `ignore_dead_deps`
+		`COALESCE(` + a + `signal_name, ''), COALESCE(` + a + `compensation_kind, ''), ` + a + `ignore_dead_deps, ` +
+		`COALESCE(` + a + `snooze_budget, 0), ` + a + `deadline_at`
 }
 
 // eventColumns is the projected ledger column list under the given alias, used
@@ -471,6 +536,8 @@ type scannedJob struct {
 	signalName       string
 	compensationKind string
 	ignoreDeadDeps   bool
+	snoozeBudget     float64
+	deadlineAt       pgtype.Timestamptz
 }
 
 // scannedEvent is the raw scan target for eventColumns.
@@ -490,6 +557,7 @@ func (sj *scannedJob) scanArgs() []any {
 		&sj.payload, &sj.meta, &sj.runAt, &sj.leaseUntil,
 		&sj.leaseToken, &sj.lastError, &sj.eventID, &sj.replay, &sj.enqueuedAt, &sj.failedAt, &sj.completedAt,
 		&sj.dagID, &sj.runID, &sj.taskKey, &sj.result, &sj.signalName, &sj.compensationKind, &sj.ignoreDeadDeps,
+		&sj.snoozeBudget, &sj.deadlineAt,
 	}
 }
 
@@ -547,6 +615,8 @@ func (sj *scannedJob) toJob() (driver.Job, error) {
 		SignalName:       sj.signalName,
 		CompensationKind: sj.compensationKind,
 		IgnoreDeadDeps:   sj.ignoreDeadDeps,
+		SnoozeBudget:     secondsToDuration(sj.snoozeBudget),
+		DeadlineAt:       sj.deadlineAt.Time,
 	}, nil
 }
 

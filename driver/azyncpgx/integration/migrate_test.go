@@ -7,6 +7,9 @@ import (
 	"github.com/kausys/azync"
 	"github.com/kausys/azync/queue"
 
+	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgtype"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/stretchr/testify/require"
 )
@@ -187,4 +190,59 @@ func TestMigrateConvergesFromDriftedTenantTraceSchema(t *testing.T) {
 	// Idempotent: running again (the normal case, version already recorded)
 	// is a no-op and does not error.
 	is.NoError(core.Migrate(ctx))
+}
+
+// TestOldOnConflictPredicateInfersAgainstNewLiveIndex pins the rolling-deploy
+// guarantee for 00009: a v0.0.5-era replica still runs CreateDAG's old ON
+// CONFLICT clause — whose inference WHERE enumerates only the THREE pre-paused
+// live states — after a new replica migrated and the old 3-state index is
+// gone. Postgres must infer the new 4-state partial unique index as the
+// arbiter (subset-IN predicate implication); if this ever regresses, every
+// CreateDAG on a not-yet-redeployed replica fails with "no unique or
+// exclusion constraint matching the ON CONFLICT specification" mid-deploy,
+// which is exactly the outage this test exists to catch in CI instead.
+func TestOldOnConflictPredicateInfersAgainstNewLiveIndex(t *testing.T) {
+	is := require.New(t)
+	base := requireDB(t)
+	schema := newSchema(t, base)
+	core := openUnmigrated(t, base, schema)
+	ctx := context.Background()
+	is.NoError(core.Migrate(ctx))
+	pool := newPool(t, base, schema)
+
+	// The old index must be gone and only the 4-state one present, or this
+	// test would prove nothing.
+	var oldExists bool
+	is.NoError(pool.QueryRow(ctx, `SELECT EXISTS (
+		SELECT FROM pg_indexes WHERE schemaname = current_schema()
+			AND indexname = 'azync_dags_idempotency_idx')`).Scan(&oldExists))
+	is.False(oldExists, "00009 must have dropped the 3-state index")
+
+	// The v0.0.5 insertDAGSQL, verbatim: 3-state inference predicate.
+	const oldInsertDAGSQL = `
+INSERT INTO azync_dags
+	(id, name, state, on_failure, idempotency_key, meta, created_at, updated_at)
+VALUES ($1, $2, 'running',
+	CASE WHEN $3 = 'suspend' THEN 'suspend' ELSE 'cancel' END,
+	NULLIF($4, ''), $5::jsonb, now(), now())
+ON CONFLICT (name, idempotency_key)
+	WHERE idempotency_key IS NOT NULL AND state IN ('running', 'suspended', 'compensating')
+DO NOTHING
+RETURNING id`
+
+	var id pgtype.UUID
+	err := pool.QueryRow(ctx, oldInsertDAGSQL,
+		uuid.New(), "it-rolling", "cancel", "roll-key", `{}`).Scan(&id)
+	is.NoError(err, "the old 3-state ON CONFLICT must infer the new 4-state index as arbiter")
+
+	// And the barrier actually fires through the old clause: a duplicate live
+	// key hits DO NOTHING (ErrNoRows from RETURNING), never a second row.
+	err = pool.QueryRow(ctx, oldInsertDAGSQL,
+		uuid.New(), "it-rolling", "cancel", "roll-key", `{}`).Scan(&id)
+	is.ErrorIs(err, pgx.ErrNoRows, "the duplicate must be absorbed by DO NOTHING through the new index")
+
+	var count int
+	is.NoError(pool.QueryRow(ctx,
+		`SELECT count(*) FROM azync_dags WHERE name = 'it-rolling'`).Scan(&count))
+	is.Equal(1, count, "exactly one live run holds the key")
 }

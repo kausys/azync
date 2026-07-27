@@ -366,12 +366,17 @@ func TestDAGSignalCompletesWaitingAndAdvancesSleep(t *testing.T) {
 		},
 	})
 
-	matched, err := f.Signal(ctx, id, "other", json.RawMessage(`{}`))
+	matched, dedup, err := f.Signal(ctx, driver.DAGSignalParams{
+		DAGID: id, Name: "other", Payload: json.RawMessage(`{}`),
+	})
 	is.NoError(err)
-	is.Zero(matched, "an unmatched signal name touches nothing")
+	is.False(dedup)
+	is.Zero(matched, "an unmatched signal name is buffered, delivering nothing now")
 
 	payload := json.RawMessage(`{"by":"ops"}`)
-	matched, err = f.Signal(ctx, id, "approved", payload)
+	matched, _, err = f.Signal(ctx, driver.DAGSignalParams{
+		DAGID: id, Name: "approved", Payload: payload,
+	})
 	is.NoError(err)
 	is.Equal(int64(2), matched, "the waiting $signal and the named $sleep both match")
 
@@ -386,13 +391,15 @@ func TestDAGSignalCompletesWaitingAndAdvancesSleep(t *testing.T) {
 	is.NoError(err)
 	is.Equal(int64(1), n)
 
-	matched, err = f.Signal(ctx, id, "approved", payload)
+	matched, _, err = f.Signal(ctx, driver.DAGSignalParams{
+		DAGID: id, Name: "approved", Payload: payload,
+	})
 	is.NoError(err)
-	is.Zero(matched, "a consumed signal has nothing left to match")
+	is.Zero(matched, "a completed signal task never re-delivers; the repeat stays buffered")
 
 	results, err := f.TaskResults(ctx, id, []string{"g"})
 	is.NoError(err)
-	is.JSONEq(string(payload), string(results["g"]))
+	is.JSONEq(string(payload), string(results["g"].Result))
 }
 
 // ---- failure policies -----------------------------------------------------
@@ -824,14 +831,14 @@ func TestDAGAckTaskResultFencingAndTaskResults(t *testing.T) {
 	results, err := f.TaskResults(ctx, id, []string{"a", "b"})
 	is.NoError(err)
 	is.Len(results, 1, "an unfinished task has no result entry")
-	is.JSONEq(`{"n":7}`, string(results["a"]))
+	is.JSONEq(`{"n":7}`, string(results["a"].Result))
 
 	// An empty key set returns every succeeded task.
 	finishKind(t, f, "res_b", nil)
 	results, err = f.TaskResults(ctx, id, nil)
 	is.NoError(err)
 	is.Len(results, 2)
-	is.Nil(results["b"], "a succeeded task without a result maps to nil")
+	is.Nil(results["b"].Result, "a succeeded task without a result maps to a nil Result")
 }
 
 // ---- internal kinds stay out of PromoteDue --------------------------------

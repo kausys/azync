@@ -139,6 +139,7 @@ func (c *Client) makeTask(def *Definition, t taskDecl) (driver.DAGTask, error) {
 		MaxAttempts:    t.maxRetries,
 		SleepFor:       t.sleepFor,
 		IgnoreDeadDeps: t.ignoreDeadDeps,
+		Deadline:       t.deadline,
 	}
 	if t.args != nil {
 		task.Kind = t.args.Kind()
@@ -167,25 +168,60 @@ func (c *Client) makeTask(def *Definition, t taskDecl) (driver.DAGTask, error) {
 	return task, nil
 }
 
-// Signal delivers a named signal with payload (marshaled to JSON) to one
+// signalOptions collects per-delivery options for Signal.
+type signalOptions struct{ messageID string }
+
+// SignalOption customizes one Signal delivery.
+type SignalOption func(*signalOptions)
+
+// WithMessageID deduplicates the delivery within (workflow, signal name):
+// while an earlier signal with the same id exists on the workflow, a repeat
+// is accepted and dropped without effect. Use the sender's event id for
+// at-least-once webhooks, so a redelivery never double-fires.
+func WithMessageID(id string) SignalOption {
+	return func(o *signalOptions) { o.messageID = id }
+}
+
+// Signal delivers a named signal with payload (marshaled to JSON) to one live
 // workflow: a waiting WaitSignal task of that name completes with the payload
-// as its result, and a pending Sleep timer of that name wakes early. When
-// nothing on the workflow was waiting for the name, it returns an error
-// wrapping ErrNoSignalMatched — the workflow may have moved on, or not reached
-// the wait yet; callers deciding to retry can test with errors.Is.
-func (c *Client) Signal(ctx context.Context, id uuid.UUID, name string, payload any) error {
+// as its result, and a pending Sleep timer of that name wakes early. The
+// signal is durable: when nothing is waiting yet — the task still blocked
+// behind dependencies, or the scheduler's promotion racing this call — it is
+// buffered and delivered by the scheduler once the task becomes deliverable,
+// never lost. It returns an error only on a marshal failure or for a missing
+// or terminal workflow (test with IsNotFound).
+func (c *Client) Signal(ctx context.Context, id uuid.UUID, name string, payload any, opts ...SignalOption) error {
 	body, err := json.Marshal(payload)
 	if err != nil {
 		return fmt.Errorf("dag: marshal signal %q payload: %w", name, err)
 	}
-	matched, err := c.store.Signal(ctx, id, name, body)
-	if err != nil {
-		return err
+	var o signalOptions
+	for _, opt := range opts {
+		opt(&o)
 	}
-	if matched == 0 {
-		return fmt.Errorf("dag: signal %q on workflow %s: %w", name, id, ErrNoSignalMatched)
+	if _, _, err := c.store.Signal(ctx, driver.DAGSignalParams{
+		DAGID: id, Name: name, MessageID: o.messageID, Payload: body,
+	}); err != nil {
+		return fmt.Errorf("dag: signal %q on workflow %s: %w", name, id, err)
 	}
 	return nil
+}
+
+// SignalByKey resolves the live workflow holding (name, idempotencyKey) and
+// delivers the signal to it, in one call — the shape a webhook handler
+// wants: it knows the provider's business key (the same string passed to
+// WithIdempotencyKey at Run), never the run UUID, and needs no bookkeeping
+// table mapping one to the other. At most one live run holds a key (the
+// dedupe barrier); terminal runs free it, so a webhook arriving after the
+// run settled gets a not-found error (test with IsNotFound) — late, not
+// wrong. The resolve and the delivery are two calls: a run settling between
+// them also surfaces as not-found from the delivery, the same right answer.
+func (c *Client) SignalByKey(ctx context.Context, name, idempotencyKey, signalName string, payload any, opts ...SignalOption) error {
+	id, err := c.store.FindDAGByKey(ctx, name, idempotencyKey)
+	if err != nil {
+		return fmt.Errorf("dag: signal by key %q/%q: %w", name, idempotencyKey, err)
+	}
+	return c.Signal(ctx, id, signalName, payload, opts...)
 }
 
 // TxRunnerClient creates dags inside the caller's own backend

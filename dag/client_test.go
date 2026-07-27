@@ -271,19 +271,91 @@ func TestSignalDeliversPayloadAndDownstreamReadsIt(t *testing.T) {
 	}, 2*time.Second, 2*time.Millisecond)
 }
 
-func TestSignalWithNothingWaitingReturnsErrNoSignalMatched(t *testing.T) {
+// TestSignalBeforeWaitIsBufferedAndDelivered proves the durable-signal
+// contract end to end: a signal sent while its WaitSignal task is still
+// blocked behind a dependency is accepted (nil error), buffered, and
+// delivered by the scheduler once the task becomes deliverable — the
+// downstream reads the payload via ResultOf. This is the webhook-vs-scheduler
+// race the inbox closes.
+func TestSignalBeforeWaitIsBufferedAndDelivered(t *testing.T) {
 	t.Parallel()
 	is := require.New(t)
 	f := drivertest.NewFake()
 	r := newTestRuntime(t, f)
 
-	res, err := r.Client().Run(context.Background(), Define("no-wait").Task("t", cliArgs{}))
+	gate := make(chan struct{})
+	is.NoError(Register(r.Worker(), func(context.Context, cliArgs) (None, error) {
+		<-gate
+		return None{}, nil
+	}))
+
+	res, err := r.Client().Run(context.Background(),
+		Define("buffered").
+			Task("t", cliArgs{}).
+			WaitSignal("approval", After("t")))
 	is.NoError(err)
 
+	// The wait task is still blocked behind "t": the webhook fires early.
+	is.NoError(r.Client().Signal(context.Background(), res.ID, "approval",
+		map[string]string{"by": "ops"}),
+		"a signal with nothing waiting yet is accepted and buffered, not an error")
+
+	close(gate) // let "t" finish; promotion + buffered delivery follow
+	startWorker(t, r.Worker())
+	is.Eventually(func() bool {
+		return dagState(t, f, res.ID) == driver.DAGSucceeded
+	}, 2*time.Second, 2*time.Millisecond, "the buffered signal delivers once the wait becomes deliverable")
+	g := taskByKey(t, f, res.ID, "approval")
+	is.JSONEq(`{"by":"ops"}`, string(g.Result))
+}
+
+// TestSignalWithMessageIDIsIdempotent proves at-least-once webhook dedupe:
+// a second delivery of the same MessageID is accepted and dropped.
+func TestSignalWithMessageIDIsIdempotent(t *testing.T) {
+	t.Parallel()
+	is := require.New(t)
+	f := drivertest.NewFake()
+	r := newTestRuntime(t, f)
+
+	res, err := r.Client().Run(context.Background(),
+		Define("dedupe").WaitSignal("approval"))
+	is.NoError(err)
+
+	first := map[string]string{"decision": "approve"}
+	is.NoError(r.Client().Signal(context.Background(), res.ID, "approval", first,
+		WithMessageID("webhook-123")))
+	// The redelivery carries a different body — it must be dropped, keeping
+	// the FIRST payload as the task's result.
+	is.NoError(r.Client().Signal(context.Background(), res.ID, "approval",
+		map[string]string{"decision": "tampered"}, WithMessageID("webhook-123")))
+
+	g := taskByKey(t, f, res.ID, "approval")
+	is.Equal(driver.StateSucceeded, g.State)
+	is.JSONEq(`{"decision":"approve"}`, string(g.Result), "the duplicate never overwrote the first delivery")
+}
+
+// TestSignalTerminalDAGReturnsNotFound pins the only error path left on
+// Signal: a missing or terminal workflow.
+func TestSignalTerminalDAGReturnsNotFound(t *testing.T) {
+	t.Parallel()
+	is := require.New(t)
+	f := drivertest.NewFake()
+	r := newTestRuntime(t, f)
+
+	is.NoError(Register(r.Worker(), func(context.Context, cliArgs) (None, error) {
+		return None{}, nil
+	}))
+	res, err := r.Client().Run(context.Background(), Define("term").Task("t", cliArgs{}))
+	is.NoError(err)
+	startWorker(t, r.Worker())
+	is.Eventually(func() bool {
+		return dagState(t, f, res.ID) == driver.DAGSucceeded
+	}, 2*time.Second, 2*time.Millisecond)
+
 	err = r.Client().Signal(context.Background(), res.ID, "ghost", nil)
-	is.Error(err)
-	is.ErrorIs(err, ErrNoSignalMatched, "the sentinel must be testable with errors.Is")
-	is.Contains(err.Error(), "ghost")
+	is.True(IsNotFound(err), "a terminal workflow rejects signals as not-found")
+	err = r.Client().Signal(context.Background(), uuid.New(), "ghost", nil)
+	is.True(IsNotFound(err), "a missing workflow rejects signals as not-found")
 }
 
 // --- transactional creation ------------------------------------------------

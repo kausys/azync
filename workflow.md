@@ -4,7 +4,7 @@ Workflow-as-code on a shared [`azync.Core`](README.md): ordinary Go functions re
 
 Side effects belong only in **Operations** (leased jobs). Workflow code must be deterministic: use `ctx.Now()`, never `time.Now()`, and do not do I/O in the workflow function.
 
-Package notes: [`workflow/README.md`](workflow/README.md) · Example: [`examples/workflow-kyc`](examples/workflow-kyc)
+Package notes: [`workflow/README.md`](workflow/README.md) · Example: [`examples/workflow-kyc`](https://github.com/kausys/azync/tree/main/examples/workflow-kyc)
 
 Requires `driver.WorkflowStore` (azyncpgx).
 
@@ -17,7 +17,7 @@ wf, err := workflow.New(core)
 
 Migrate the Core. Register every `(name, version)` for workflows and Operations **before** `Worker.Start`.
 
-**Changing a workflow's or Operation's code always means registering it under a new version.** Replay re-executes the function against durable history, so editing the code registered under a version already in flight is a determinism violation: an in-progress execution's next replay pass may see a call sequence that no longer matches what its history recorded, and the workflow-task job retries with backoff, then suspends the execution once its retry budget is exhausted (alertable via `Manager.Get`, recoverable with `ResumeWorkflow` once the code is fixed) — never silently wrong, but not obviously connected to "I edited the handler" either. `RegisterWorkflow` / `RegisterOperation` panic immediately if called twice for the same `(name, version)`, so a copy-paste duplicate registration or a forgotten version bump fails at startup instead of at replay time.
+**Changing a workflow's or Operation's code always means registering it under a new version.** Replay re-executes the function against durable history, so editing the code registered under a version already in flight is a determinism violation: an in-progress execution's next replay pass may see a call sequence that no longer matches what its history recorded, and the workflow-task job retries with backoff, then suspends the execution once its retry budget is exhausted (alertable via `Manager.Get`, recoverable with `Manager.Resume` once the fixed code is deployed) — never silently wrong, but not obviously connected to "I edited the handler" either. `RegisterWorkflow` / `RegisterOperation` panic immediately if called twice for the same `(name, version)`, so a copy-paste duplicate registration or a forgotten version bump fails at startup instead of at replay time.
 
 ## Register and start
 
@@ -59,9 +59,9 @@ A second `Start` with the same `(name, business key)` against a **live** executi
 
 | API | Role |
 |-----|------|
-| `ExecuteOperation` | Schedule a leased Operation; returns a `Future` |
+| `ExecuteOperation` | Schedule a leased Operation — **parks** until the Operation settled (the returned `Future` is always resolved) |
 | `Sleep` / `WaitSignal` | Futures — they do **not** park by themselves |
-| `Select` | **Only** way to park; first ready future wins (registration order breaks ties) |
+| `Select` | Parks on unready futures (Sleep / WaitSignal); first ready future wins (registration order breaks ties) |
 | `Future.Get` / `Ready` / `Err` | Read the outcome after Select (or when already complete) |
 
 ```go
@@ -85,7 +85,10 @@ case 1:
 
 ### Polling (external status)
 
-Do **not** use `dag.NotReady`. Pattern:
+`dag.NotReady(d)` works inside an Operation too (cross-runtime sentinels:
+it snoozes the Operation job for `d` without consuming its retry budget, and
+`dag.Abort` / `dag.Skip` / `event.Permanent` keep their semantics as well).
+For workflow-code-driven polling, the deterministic pattern is:
 
 ```text
 ExecuteOperation(query) → decide in workflow code → Select(Sleep) → ExecuteOperation(query) → …
@@ -122,9 +125,13 @@ While an Operation runs, the runtime renews the lease every `LeaseTTL/2`. Losing
 ## Retention and admin
 
 - `workflow.WithRetention(d)` — vacuum terminal executions (default **30 days**; `0` = forever)
-- `Manager.Get` / `Cancel` / `ResolveUncertain`
+- `Manager.Get` / `Cancel` / `ResolveUncertain` / `Suspend` / `Resume`
 
-MVP Manager has no List/Retry/Compensate (those are dag concerns).
+`Suspend` is the operator freeze (reason recorded, no replay until resumed);
+`Resume` flips a suspended execution back AND re-enqueues its workflow-task
+immediately — the documented recovery path after a determinism violation is
+fixed and deployed. MVP Manager has no List/Retry/Compensate (those are dag
+concerns).
 
 ## Guarantees (short)
 

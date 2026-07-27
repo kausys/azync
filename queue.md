@@ -2,7 +2,7 @@
 
 Durable typed background jobs on a shared [`azync.Core`](README.md). Rows live in `azync_jobs` with `source=queue`.
 
-Package notes (internals): [`queue/README.md`](queue/README.md) · Example: [`examples/queue-basic`](examples/queue-basic)
+Package notes (internals): [`queue/README.md`](queue/README.md) · Example: [`examples/queue-basic`](https://github.com/kausys/azync/tree/main/examples/queue-basic)
 
 ## Install
 

@@ -71,6 +71,13 @@ const (
 	// not be proven (timeout after send, ambiguous transport). It is not
 	// retried automatically; Manager.ResolveUncertain settles it.
 	StateUncertain JobState = "uncertain"
+	// StateSkipped is a terminal state for a task that deliberately did no
+	// work (the handler judged it unnecessary — say, the resource was already
+	// in the target state). It satisfies dependencies like StateSucceeded,
+	// carries no result and never compensates, and is first-class in the ops
+	// surfaces so "ran and worked" and "ran and had nothing to do" stay
+	// distinguishable (SourceDAG only).
+	StateSkipped JobState = "skipped"
 )
 
 // EnqueueParams is the durable input for a single queue job (Source
@@ -216,6 +223,14 @@ type Job struct {
 	// IgnoreDeadDeps marks the task promotable over dead or cancelled
 	// dependencies.
 	IgnoreDeadDeps bool
+	// SnoozeBudget, when positive, bounds the job's snooze/NotReady loop: the
+	// first Snooze stamps DeadlineAt = now()+SnoozeBudget on the backend
+	// clock. Zero means the job can snooze forever.
+	SnoozeBudget time.Duration
+	// DeadlineAt is the stamped snooze deadline; zero until the first Snooze
+	// of a job with a SnoozeBudget. A Snooze settled past it dead-letters the
+	// job instead of parking it.
+	DeadlineAt time.Time
 	// EnqueuedAt, FailedAt and CompletedAt are lifecycle timestamps; the latter
 	// two are zero until the corresponding transition occurs.
 	EnqueuedAt  time.Time

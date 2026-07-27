@@ -275,12 +275,17 @@ func TestDAGWaitSignalDeliversPayload(t *testing.T) {
 		return taskView(t, m, res.ID, "approved").State == dag.TaskWaiting
 	}, wfSettle, 50*time.Millisecond, "the WaitSignal task must park before it is signalled")
 
-	// A signal no task is waiting for is a typed, testable error.
-	err = r.Client().Signal(ctx, res.ID, "ghost", nil)
-	is.ErrorIs(err, dag.ErrNoSignalMatched)
-	is.Contains(err.Error(), "ghost")
+	// A signal no task is waiting for is accepted and buffered — never lost,
+	// never an error (only a missing/terminal workflow errors, as not-found).
+	is.NoError(r.Client().Signal(ctx, res.ID, "ghost", nil))
+	err = r.Client().Signal(ctx, uuid.New(), "ghost", nil)
+	is.True(dag.IsNotFound(err), "a missing workflow rejects signals as not-found")
 
-	is.NoError(r.Client().Signal(ctx, res.ID, "approved", approvalPayload{By: "ops"}))
+	is.NoError(r.Client().Signal(ctx, res.ID, "approved", approvalPayload{By: "ops"},
+		dag.WithMessageID("webhook-1")))
+	// An at-least-once redelivery of the same webhook is dropped by dedupe.
+	is.NoError(r.Client().Signal(ctx, res.ID, "approved", approvalPayload{By: "tampered"},
+		dag.WithMessageID("webhook-1")))
 	select {
 	case by := <-gotBy:
 		is.Equal("ops", by, "the downstream task reads the signal payload via ResultOf")

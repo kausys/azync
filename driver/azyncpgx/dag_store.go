@@ -38,13 +38,13 @@ VALUES ($1, $2, 'running',
 	CASE WHEN $3 = 'suspend' THEN 'suspend' ELSE 'cancel' END,
 	NULLIF($4, ''), $5::jsonb, now(), now())
 ON CONFLICT (name, idempotency_key)
-	WHERE idempotency_key IS NOT NULL AND state IN ('running', 'suspended', 'compensating')
+	WHERE idempotency_key IS NOT NULL AND state IN ('running', 'suspended', 'compensating', 'paused')
 DO NOTHING
 RETURNING id`
 
 const selectLiveDAGSQL = `
 SELECT id FROM azync_dags
-WHERE name = $1 AND idempotency_key = $2 AND state IN ('running', 'suspended', 'compensating')`
+WHERE name = $1 AND idempotency_key = $2 AND state IN ('running', 'suspended', 'compensating', 'paused')`
 
 // insertDAGTaskSQL inserts one task job. State is resolved by the caller and
 // run_at is computed DB-side: a root $sleep starts its timer at now()+SleepFor,
@@ -53,10 +53,12 @@ const insertDAGTaskSQL = `
 INSERT INTO azync_jobs
 	(id, source, kind, state, run_at, max_attempts, max_attempts_explicit,
 	 payload, meta, enqueued_at,
-	 dag_id, task_key, compensation_kind, compensation_payload, signal_name, ignore_dead_deps)
+	 dag_id, task_key, compensation_kind, compensation_payload, signal_name, ignore_dead_deps,
+	 snooze_budget)
 VALUES ($1, 'dag', $2, $3, now() + make_interval(secs => $4), $5, $6,
 	$7::jsonb, $8::jsonb, now(),
-	$9, $10, NULLIF($11, ''), $12::jsonb, NULLIF($13, ''), $14)`
+	$9, $10, NULLIF($11, ''), $12::jsonb, NULLIF($13, ''), $14,
+	NULLIF($15::double precision, 0))`
 
 const insertDepSQL = `
 INSERT INTO azync_dag_deps (dag_id, task_key, depends_on_key) VALUES ($1, $2, $3)`
@@ -147,7 +149,7 @@ func (s *Store) createDAG(ctx context.Context, q querier, p driver.DAGParams) (b
 			uuid.New(), tk.Kind, state, runAtOffsetSecs, tk.MaxAttempts, tk.MaxAttempts > 0,
 			payload, string(metaJSON),
 			p.ID, tk.Key, tk.CompensationKind, nullableRawJSON(tk.CompensationPayload),
-			tk.SignalName, tk.IgnoreDeadDeps,
+			tk.SignalName, tk.IgnoreDeadDeps, tk.Deadline.Seconds(),
 		); err != nil {
 			return false, uuid.Nil, fmt.Errorf("azyncpgx: insert dag task %q: %w", tk.Key, err)
 		}
@@ -195,10 +197,10 @@ type sleepPayload struct {
 
 // --- scheduler -------------------------------------------------------------
 
-// signalSQL completes waiting $signal tasks named $2 (payload as result) and
-// wakes scheduled $sleep timers named $2 early. The two UPDATEs touch disjoint
-// (kind, state) rows, so no row is double-counted.
-const signalSQL = `
+// deliverSignalNowSQL completes waiting $signal tasks named $2 (payload as
+// result) and wakes scheduled $sleep timers named $2 early. The two UPDATEs
+// touch disjoint (kind, state) rows, so no row is double-counted.
+const deliverSignalNowSQL = `
 WITH sig AS (
 	UPDATE azync_jobs SET
 		state = 'succeeded', result = $3::jsonb, completed_at = now(), updated_at = now()
@@ -214,23 +216,128 @@ slp AS (
 )
 SELECT (SELECT count(*) FROM sig) + (SELECT count(*) FROM slp)`
 
-// Signal delivers a named signal to one workflow: every waiting $signal task
-// completes as succeeded with the payload as its result, and every scheduled
-// $sleep timer of the name is woken early. It returns the number affected.
-func (s *Store) Signal(ctx context.Context, dagID uuid.UUID, name string, payload json.RawMessage) (int64, error) {
-	var matched int64
-	if err := s.pool.QueryRow(ctx, signalSQL, dagID, name, nullableRawJSON(payload)).Scan(&matched); err != nil {
-		return 0, fmt.Errorf("azyncpgx: signal: %w", err)
+const insertDAGSignalSQL = `
+INSERT INTO azync_dag_signals (id, dag_id, name, message_id, payload)
+VALUES ($1, $2, $3, NULLIF($4, ''), $5::jsonb)
+ON CONFLICT (dag_id, name, message_id) WHERE message_id IS NOT NULL DO NOTHING
+RETURNING id`
+
+const consumeDAGSignalSQL = `UPDATE azync_dag_signals SET consumed = true WHERE id = $1`
+
+// Signal delivers (or buffers) one named signal on a live workflow. One
+// transaction: the header lock serializes against ApplyFailurePolicy /
+// CancelDAG / CompensateDAG (which take the same FOR UPDATE), the inbox
+// insert dedupes by MessageID, and the immediate-delivery attempt completes a
+// waiting $signal (payload as result) or wakes a scheduled $sleep. A signal
+// nothing was waiting for stays buffered, unconsumed, for
+// DeliverBufferedSignals — never lost. No notify: $signal/$sleep have no
+// handler; dependents are promoted (and notified) by the scheduler tick.
+func (s *Store) Signal(ctx context.Context, p driver.DAGSignalParams) (int64, bool, error) {
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return 0, false, fmt.Errorf("azyncpgx: signal begin: %w", err)
 	}
-	return matched, nil
+	defer func() { _ = tx.Rollback(ctx) }()
+
+	var state string
+	err = tx.QueryRow(ctx, `SELECT state FROM azync_dags WHERE id = $1 FOR UPDATE`, p.DAGID).Scan(&state)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return 0, false, driver.NewNotFound("signal dag")
+	}
+	if err != nil {
+		return 0, false, fmt.Errorf("azyncpgx: signal lock dag: %w", err)
+	}
+	if isTerminalDAGState(state) {
+		return 0, false, driver.NewNotFound("signal dag")
+	}
+
+	var inboxID pgtype.UUID
+	err = tx.QueryRow(ctx, insertDAGSignalSQL,
+		uuid.New(), p.DAGID, p.Name, p.MessageID, nullableRawJSON(p.Payload),
+	).Scan(&inboxID)
+	if errors.Is(err, pgx.ErrNoRows) {
+		// The dedupe index fired: same (dag, name, message_id) already
+		// accepted. Nothing further happens — not even redelivery.
+		return 0, true, nil
+	}
+	if err != nil {
+		return 0, false, fmt.Errorf("azyncpgx: signal inbox insert: %w", err)
+	}
+
+	var delivered int64
+	if err := tx.QueryRow(ctx, deliverSignalNowSQL, p.DAGID, p.Name, nullableRawJSON(p.Payload)).Scan(&delivered); err != nil {
+		return 0, false, fmt.Errorf("azyncpgx: signal deliver: %w", err)
+	}
+	if delivered > 0 {
+		if _, err := tx.Exec(ctx, consumeDAGSignalSQL, toUUID(inboxID)); err != nil {
+			return 0, false, fmt.Errorf("azyncpgx: signal consume: %w", err)
+		}
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return 0, false, fmt.Errorf("azyncpgx: signal commit: %w", err)
+	}
+	return delivered, false, nil
+}
+
+// deliverBufferedSignalsSQL reconciles the inbox against deliverable tasks in
+// one set-based statement: for each deliverable task (waiting $signal or
+// scheduled $sleep of a live workflow) the OLDEST unconsumed signal of its
+// name is delivered and marked consumed. DISTINCT ON (t.id) guarantees one
+// signal per task per pass even when several are buffered; the leftovers
+// deliver on later passes should the task ever wait again (in practice a
+// completed $signal never re-waits, so they simply age out with the DAG).
+const deliverBufferedSignalsSQL = `
+WITH deliverable AS (
+	SELECT DISTINCT ON (t.id)
+		s.id AS signal_id, t.id AS task_id, t.kind AS task_kind, s.payload
+	FROM azync_dag_signals s
+	JOIN azync_dags w ON w.id = s.dag_id AND w.state IN ('running', 'compensating')
+	JOIN azync_jobs t ON t.source = 'dag' AND t.dag_id = s.dag_id AND t.signal_name = s.name
+		AND ((t.kind = '$signal' AND t.state = 'waiting')
+		  OR (t.kind = '$sleep'  AND t.state = 'scheduled'))
+	WHERE NOT s.consumed
+	ORDER BY t.id, s.created_at, s.id
+),
+sig AS (
+	UPDATE azync_jobs t SET
+		state = 'succeeded', result = d.payload, completed_at = now(), updated_at = now()
+	FROM deliverable d
+	WHERE t.id = d.task_id AND d.task_kind = '$signal' AND t.state = 'waiting'
+	RETURNING d.signal_id
+),
+slp AS (
+	UPDATE azync_jobs t SET run_at = now(), updated_at = now()
+	FROM deliverable d
+	WHERE t.id = d.task_id AND d.task_kind = '$sleep' AND t.state = 'scheduled'
+	RETURNING d.signal_id
+),
+done AS (
+	UPDATE azync_dag_signals s SET consumed = true
+	FROM (SELECT signal_id FROM sig UNION ALL SELECT signal_id FROM slp) u
+	WHERE s.id = u.signal_id
+	RETURNING 1
+)
+SELECT count(*) FROM done`
+
+// DeliverBufferedSignals hands buffered inbox signals to tasks that have
+// become deliverable since the signal arrived, oldest first per task, and
+// returns the count. Set-based and idempotent; called on the scheduler tick
+// right after PromoteUnblocked.
+func (s *Store) DeliverBufferedSignals(ctx context.Context) (int64, error) {
+	var n int64
+	if err := s.pool.QueryRow(ctx, deliverBufferedSignalsSQL).Scan(&n); err != nil {
+		return 0, fmt.Errorf("azyncpgx: deliver buffered signals: %w", err)
+	}
+	return n, nil
 }
 
 // promoteUnblockedSQL releases blocked tasks whose dependencies are all
 // satisfied, into the runnable state their kind dictates. A dependency is
-// satisfied when it succeeded; a task with ignore_dead_deps also tolerates dead
-// or cancelled dependencies. Only running and compensating dags promote. A
-// dependency edge whose task is missing keeps the task blocked (the inner NOT
-// EXISTS finds no satisfying row).
+// satisfied when it succeeded or was deliberately skipped; a task with
+// ignore_dead_deps also tolerates dead or cancelled dependencies. Only
+// running and compensating dags promote. A dependency edge whose task is
+// missing keeps the task blocked (the inner NOT EXISTS finds no satisfying
+// row).
 const promoteUnblockedSQL = `
 UPDATE azync_jobs t SET
 	state = CASE t.kind WHEN '$signal' THEN 'waiting' WHEN '$sleep' THEN 'scheduled' ELSE 'pending' END,
@@ -249,7 +356,7 @@ WHERE t.source = 'dag' AND t.state = 'blocked'
 				SELECT 1 FROM azync_jobs dep
 				WHERE dep.dag_id = d.dag_id AND dep.task_key = d.depends_on_key
 					AND dep.source = 'dag'
-					AND (dep.state = 'succeeded' OR (t.ignore_dead_deps AND dep.state IN ('dead', 'cancelled')))
+					AND (dep.state IN ('succeeded', 'skipped') OR (t.ignore_dead_deps AND dep.state IN ('dead', 'cancelled')))
 			)
 	)
 RETURNING t.kind, (t.kind <> '$sleep' AND t.kind <> '$signal') AS became_pending`
@@ -483,7 +590,7 @@ func (s *Store) lockDAGForUpdate(ctx context.Context, q querier, id uuid.UUID) (
 
 const cancelRemainingTasksSQL = `
 UPDATE azync_jobs SET state = 'cancelled', completed_at = now(), updated_at = now()
-WHERE dag_id = $1 AND source = 'dag' AND state IN ('pending', 'scheduled', 'blocked', 'waiting')`
+WHERE dag_id = $1 AND source = 'dag' AND state IN ('pending', 'scheduled', 'blocked', 'waiting', 'paused')`
 
 // cancelRemainingTasks cancels the workflow's non-terminal, non-active tasks. An
 // active task keeps its lease and settles on its own.
@@ -589,12 +696,12 @@ func (s *Store) insertCompensations(ctx context.Context, q querier, dagID uuid.U
 // --- completion ------------------------------------------------------------
 
 // completeRunningSucceededSQL settles a running workflow whose tasks are all
-// succeeded (none dead) to succeeded.
+// succeeded or deliberately skipped (none dead) to succeeded.
 const completeRunningSucceededSQL = `
 UPDATE azync_dags w SET state = 'succeeded', completed_at = now(), updated_at = now()
 WHERE w.state = 'running'
 	AND EXISTS (SELECT 1 FROM azync_jobs j WHERE j.dag_id = w.id AND j.source = 'dag')
-	AND NOT EXISTS (SELECT 1 FROM azync_jobs j WHERE j.dag_id = w.id AND j.source = 'dag' AND j.state <> 'succeeded')`
+	AND NOT EXISTS (SELECT 1 FROM azync_jobs j WHERE j.dag_id = w.id AND j.source = 'dag' AND j.state NOT IN ('succeeded', 'skipped'))`
 
 // completeRunningFailedSQL settles a running workflow whose tasks are all
 // terminal (succeeded or dead) with at least one dead — every dead task
@@ -621,7 +728,7 @@ FROM (
 		AND NOT EXISTS (
 			SELECT 1 FROM azync_jobs j2
 			WHERE j2.dag_id = j.dag_id AND j2.source = 'dag'
-				AND j2.state <> 'succeeded' AND j2.state <> 'dead'
+				AND j2.state NOT IN ('succeeded', 'skipped', 'dead')
 		)
 		AND NOT EXISTS (
 			SELECT 1 FROM azync_jobs jd
@@ -702,34 +809,36 @@ func (s *Store) CompleteDAGs(ctx context.Context) (int64, error) {
 // --- results ---------------------------------------------------------------
 
 const taskResultsSQL = `
-SELECT task_key, result::text
+SELECT task_key, result::text, (state = 'skipped') AS skipped
 FROM azync_jobs
-WHERE dag_id = $1 AND source = 'dag' AND state = 'succeeded'
+WHERE dag_id = $1 AND source = 'dag' AND state IN ('succeeded', 'skipped')
 	AND ($2 OR task_key = ANY($3::text[]))`
 
-// TaskResults returns the persisted results of the workflow's succeeded tasks,
-// keyed by task key, restricted to keys when non-empty. A succeeded task without
-// a result maps to a nil value.
-func (s *Store) TaskResults(ctx context.Context, dagID uuid.UUID, keys []string) (map[string]json.RawMessage, error) {
+// TaskResults returns the settled outcomes of the workflow's succeeded and
+// skipped tasks, keyed by task key, restricted to keys when non-empty. A
+// succeeded task without a result maps to an entry with a nil Result; a
+// skipped one to Skipped=true — distinguishable, never a silent zero value.
+func (s *Store) TaskResults(ctx context.Context, dagID uuid.UUID, keys []string) (map[string]driver.TaskResult, error) {
 	rows, err := s.pool.Query(ctx, taskResultsSQL, dagID, len(keys) == 0, keys)
 	if err != nil {
 		return nil, fmt.Errorf("azyncpgx: task results: %w", err)
 	}
 	defer rows.Close()
-	out := map[string]json.RawMessage{}
+	out := map[string]driver.TaskResult{}
 	for rows.Next() {
 		var (
-			key    string
-			result *string
+			key     string
+			result  *string
+			skipped bool
 		)
-		if err := rows.Scan(&key, &result); err != nil {
+		if err := rows.Scan(&key, &result, &skipped); err != nil {
 			return nil, fmt.Errorf("azyncpgx: scan task result: %w", err)
 		}
-		if result == nil {
-			out[key] = nil
-		} else {
-			out[key] = json.RawMessage(*result)
+		tr := driver.TaskResult{Skipped: skipped}
+		if result != nil && !skipped {
+			tr.Result = json.RawMessage(*result)
 		}
+		out[key] = tr
 	}
 	if err := rows.Err(); err != nil {
 		return nil, fmt.Errorf("azyncpgx: iterate task results: %w", err)
@@ -901,33 +1010,50 @@ func (s *Store) requireDAG(ctx context.Context, op string, id uuid.UUID) error {
 }
 
 // resetDeadTasksSQL resets the workflow's dead tasks to a fresh pending state
-// (attempt and reap_count cleared). When the workflow carries a compensation
-// chain ($2 true) only the compensation tasks reset, so original tasks never
-// rerun once compensation started.
+// (attempt and reap_count cleared, and the stamped snooze deadline dropped so
+// a retried task waits with a fresh budget — without this, a task that died
+// on its deadline would re-die on its very next snooze). When the workflow
+// carries a compensation chain ($2 true) only the compensation tasks reset,
+// so original tasks never rerun once compensation started.
 const resetDeadTasksSQL = `
 UPDATE azync_jobs SET
 	state = 'pending', run_at = now(), attempt = 0, reap_count = 0,
-	last_error = NULL, failed_at = NULL, updated_at = now()
+	last_error = NULL, failed_at = NULL, deadline_at = NULL, updated_at = now()
 WHERE dag_id = $1 AND source = 'dag' AND state = 'dead'
 	AND (NOT $2 OR task_key LIKE 'comp:%')
 RETURNING kind`
 
-// resumeDAGSQL resumes a suspended workflow: to compensating when a
-// compensation chain exists, otherwise to running with the failure cleared. A
-// workflow in any other state keeps its state (only its updated_at advances).
+// unpauseTasksSQL releases the workflow's operator-paused tasks back to the
+// ready set per their run_at, also dropping the stamped snooze deadline: time
+// spent paused (say, waiting out a provider outage) must not burn the wait
+// budget, so it re-stamps on the next first snooze.
+const unpauseTasksSQL = `
+UPDATE azync_jobs SET
+	state = CASE WHEN run_at <= now() THEN 'pending' ELSE 'scheduled' END,
+	deadline_at = NULL, updated_at = now()
+WHERE dag_id = $1 AND source = 'dag' AND state = 'paused'
+RETURNING kind, (run_at <= now()) AS runnable`
+
+// resumeDAGSQL resumes a suspended or operator-paused workflow: to
+// compensating when a compensation chain exists, otherwise to running with
+// the recorded reason cleared. A workflow in any other state keeps its state
+// (only its updated_at advances).
 const resumeDAGSQL = `
 UPDATE azync_dags SET
 	state = CASE
-		WHEN state = 'suspended' AND $2 THEN 'compensating'
-		WHEN state = 'suspended' AND NOT $2 THEN 'running'
+		WHEN state IN ('suspended', 'paused') AND $2 THEN 'compensating'
+		WHEN state IN ('suspended', 'paused') AND NOT $2 THEN 'running'
 		ELSE state END,
-	failure_reason = CASE WHEN state = 'suspended' AND NOT $2 THEN NULL ELSE failure_reason END,
+	failure_reason = CASE WHEN state IN ('suspended', 'paused') AND NOT $2 THEN NULL ELSE failure_reason END,
 	updated_at = now()
 WHERE id = $1`
 
-// RetryDAG resumes a non-terminal workflow after failures, resetting its
-// dead tasks (or only its dead compensation tasks once a chain exists) and, for
-// a suspended workflow, resuming it — to running, or back to compensating.
+// RetryDAG resumes a non-terminal workflow after failures or an operator
+// pause: dead tasks reset (or only dead compensation tasks once a chain
+// exists), paused tasks return to the ready set, and a suspended or paused
+// workflow resumes — to running, or back to compensating. Both paths clear
+// the tasks' stamped snooze deadline, so a resumed wait starts with a fresh
+// budget.
 func (s *Store) RetryDAG(ctx context.Context, id uuid.UUID) error {
 	tx, err := s.pool.Begin(ctx)
 	if err != nil {
@@ -959,6 +1085,27 @@ func (s *Store) RetryDAG(ctx context.Context, id uuid.UUID) error {
 	}
 	rows.Close()
 
+	rows, err = tx.Query(ctx, unpauseTasksSQL, id)
+	if err != nil {
+		return fmt.Errorf("azyncpgx: unpause tasks: %w", err)
+	}
+	for rows.Next() {
+		var kind string
+		var runnable bool
+		if err := rows.Scan(&kind, &runnable); err != nil {
+			rows.Close()
+			return fmt.Errorf("azyncpgx: scan unpaused task: %w", err)
+		}
+		if runnable {
+			notifyKinds[kind] = struct{}{}
+		}
+	}
+	if err := rows.Err(); err != nil {
+		rows.Close()
+		return fmt.Errorf("azyncpgx: iterate unpaused tasks: %w", err)
+	}
+	rows.Close()
+
 	if _, err := tx.Exec(ctx, resumeDAGSQL, id, hasComps); err != nil {
 		return fmt.Errorf("azyncpgx: resume dag: %w", err)
 	}
@@ -967,6 +1114,66 @@ func (s *Store) RetryDAG(ctx context.Context, id uuid.UUID) error {
 	}
 	if err := tx.Commit(ctx); err != nil {
 		return fmt.Errorf("azyncpgx: retry dag commit: %w", err)
+	}
+	return nil
+}
+
+// FindDAGByKey resolves the live workflow holding (name, idempotencyKey) —
+// the business-key lookup a webhook handler needs. Served by the partial
+// unique dedupe index, so at most one row can match.
+func (s *Store) FindDAGByKey(ctx context.Context, name, idempotencyKey string) (uuid.UUID, error) {
+	var id pgtype.UUID
+	err := s.pool.QueryRow(ctx, selectLiveDAGSQL, name, idempotencyKey).Scan(&id)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return uuid.Nil, driver.NewNotFound("find dag by key")
+	}
+	if err != nil {
+		return uuid.Nil, fmt.Errorf("azyncpgx: find dag by key: %w", err)
+	}
+	return toUUID(id), nil
+}
+
+const pauseDAGHeaderSQL = `
+UPDATE azync_dags SET state = 'paused', failure_reason = $2, updated_at = now()
+WHERE id = $1 AND state = 'running'`
+
+const pauseDAGTasksSQL = `
+UPDATE azync_jobs SET state = 'paused', updated_at = now()
+WHERE dag_id = $1 AND source = 'dag' AND state IN ('pending', 'scheduled')`
+
+// PauseDAG freezes a running workflow: header to paused (reason recorded in
+// failure_reason — the "why is this stopped" column for both suspensions and
+// pauses), pending/scheduled tasks to paused, one transaction. Blocked and
+// waiting tasks keep their states: with the header out of
+// running/compensating, PromoteUnblocked and DeliverBufferedSignals skip the
+// workflow, and incoming signals buffer for delivery after RetryDAG resumes
+// it. The row lock serializes against the scheduler's policy/cancel passes.
+func (s *Store) PauseDAG(ctx context.Context, id uuid.UUID, reason string) error {
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return fmt.Errorf("azyncpgx: pause dag begin: %w", err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+
+	var state string
+	err = tx.QueryRow(ctx, `SELECT state FROM azync_dags WHERE id = $1 FOR UPDATE`, id).Scan(&state)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return driver.NewNotFound("pause dag")
+	}
+	if err != nil {
+		return fmt.Errorf("azyncpgx: pause dag: %w", err)
+	}
+	if state != string(driver.DAGRunning) {
+		return driver.NewNotFound("pause dag")
+	}
+	if _, err := tx.Exec(ctx, pauseDAGHeaderSQL, id, reason); err != nil {
+		return fmt.Errorf("azyncpgx: pause dag header: %w", err)
+	}
+	if _, err := tx.Exec(ctx, pauseDAGTasksSQL, id); err != nil {
+		return fmt.Errorf("azyncpgx: pause dag tasks: %w", err)
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return fmt.Errorf("azyncpgx: pause dag commit: %w", err)
 	}
 	return nil
 }
@@ -996,7 +1203,8 @@ func (s *Store) CompensateDAG(ctx context.Context, id uuid.UUID) error {
 	if err != nil {
 		return fmt.Errorf("azyncpgx: compensate dag: %w", err)
 	}
-	if state != string(driver.DAGRunning) && state != string(driver.DAGSuspended) {
+	if state != string(driver.DAGRunning) && state != string(driver.DAGSuspended) &&
+		state != string(driver.DAGPaused) {
 		return driver.NewNotFound("compensate dag")
 	}
 

@@ -594,7 +594,8 @@ func (f *Fake) hasLiveWorkflowJobLocked(workflowID uuid.UUID) bool {
 		case driver.StatePending, driver.StateScheduled, driver.StateActive, driver.StateUncertain:
 			return true
 		case driver.StateDead, driver.StatePaused, driver.StateSucceeded,
-			driver.StateBlocked, driver.StateWaiting, driver.StateCancelled:
+			driver.StateBlocked, driver.StateWaiting, driver.StateCancelled,
+			driver.StateSkipped:
 			// terminal or otherwise not a live workflow-task/Operation state
 		}
 	}

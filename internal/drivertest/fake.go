@@ -507,6 +507,25 @@ func (f *Fake) Dead(_ context.Context, id, leaseToken uuid.UUID, lastError strin
 	return nil
 }
 
+// Skip settles an active job as skipped: terminal deliberate no-op, the
+// reason retained, counted as processed, no attempts row.
+func (f *Fake) Skip(_ context.Context, id, leaseToken uuid.UUID, reason string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	j, err := f.settle("skip", id, leaseToken)
+	if err != nil {
+		return err
+	}
+	now := f.now()
+	j.State = driver.StateSkipped
+	j.LeaseToken = uuid.Nil
+	j.LeaseUntil = time.Time{}
+	j.LastError = reason
+	j.CompletedAt = now
+	f.bumpStat(j.Source, j.Kind, statProcessed, 1, now)
+	return nil
+}
+
 // Release returns a leased job to pending without recording an attempt,
 // decrementing the attempt it did not really spend.
 func (f *Fake) Release(_ context.Context, id, leaseToken uuid.UUID) error {
@@ -528,20 +547,37 @@ func (f *Fake) Release(_ context.Context, id, leaseToken uuid.UUID) error {
 
 // Snooze parks an active job as scheduled after delay without consuming the
 // retry budget: the attempt of the lease being handed back is decremented and
-// no attempt history is recorded (polling-wait semantics).
-func (f *Fake) Snooze(_ context.Context, id, leaseToken uuid.UUID, delay time.Duration) error {
+// no attempt history is recorded (polling-wait semantics). A job with a
+// snooze budget stamps its deadline on the first snooze; a snooze settled
+// past a stamped deadline dead-letters the job instead (deadlined=true),
+// recording the final attempt — mirroring azyncpgx's atomic escalation.
+func (f *Fake) Snooze(_ context.Context, id, leaseToken uuid.UUID, delay time.Duration, deadlineError string) (bool, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	j, err := f.settle("snooze", id, leaseToken)
 	if err != nil {
-		return err
+		return false, err
+	}
+	now := f.now()
+	if !j.DeadlineAt.IsZero() && !now.Before(j.DeadlineAt) {
+		j.State = driver.StateDead
+		j.LeaseToken = uuid.Nil
+		j.LeaseUntil = time.Time{}
+		j.LastError = deadlineError
+		j.FailedAt = now
+		f.recordAttempt(j.ID, j.Attempt, deadlineError, now)
+		f.bumpStat(j.Source, j.Kind, statFailed, 1, now)
+		return true, nil
+	}
+	if j.DeadlineAt.IsZero() && j.SnoozeBudget > 0 {
+		j.DeadlineAt = now.Add(j.SnoozeBudget)
 	}
 	j.State = driver.StateScheduled
-	j.RunAt = f.now().Add(delay)
+	j.RunAt = now.Add(delay)
 	j.Attempt = max(j.Attempt-1, 0)
 	j.LeaseToken = uuid.Nil
 	j.LeaseUntil = time.Time{}
-	return nil
+	return false, nil
 }
 
 // ExtendLease renews an active job's lease.
@@ -882,6 +918,9 @@ func (f *Fake) resetToPending(j *fakeJob) {
 	j.ReapCount = 0
 	j.LastError = ""
 	j.FailedAt = time.Time{}
+	// A retried job waits with a fresh snooze budget: the stamped deadline is
+	// dropped and re-stamps on the next first snooze.
+	j.DeadlineAt = time.Time{}
 	f.wake(j.Source, j.Kind)
 }
 
@@ -924,6 +963,20 @@ func (f *Fake) ResumeJob(_ context.Context, source driver.Source, id uuid.UUID) 
 		j.State = driver.StatePending
 		f.wake(j.Source, j.Kind)
 	}
+	return nil
+}
+
+// RunNow expedites a scheduled job to pending with run_at = now.
+func (f *Fake) RunNow(_ context.Context, source driver.Source, id uuid.UUID) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	j := f.jobs[id]
+	if j == nil || j.Source != source || j.State != driver.StateScheduled {
+		return driver.NewNotFound("run now")
+	}
+	j.State = driver.StatePending
+	j.RunAt = f.now()
+	f.wake(j.Source, j.Kind)
 	return nil
 }
 

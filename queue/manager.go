@@ -250,6 +250,14 @@ func (m *Manager) Resume(ctx context.Context, id uuid.UUID) error {
 	return m.store.ResumeJob(ctx, driver.SourceQueue, id)
 }
 
+// RunNow expedites one scheduled job — a retry backoff or a Snooze — to run
+// immediately: run_at moves to now, the job returns to pending and workers
+// wake. It returns a not-found error (see IsNotFound) when the job is not
+// scheduled.
+func (m *Manager) RunNow(ctx context.Context, id uuid.UUID) error {
+	return m.store.RunNow(ctx, driver.SourceQueue, id)
+}
+
 // Delete removes one job in the given state (active jobs cannot be deleted —
 // pass their real state; a running job's row is owned by its worker).
 func (m *Manager) Delete(ctx context.Context, id uuid.UUID, state JobState) error {

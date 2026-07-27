@@ -87,9 +87,15 @@ const (
 	OutcomeAbort
 	// OutcomeSnooze parks the job as scheduled after Delay via Store.Snooze,
 	// without consuming a retry attempt and regardless of the remaining
-	// budget: the polling-wait primitive (the workflow runtime maps NotReady
-	// to it).
+	// budget: the polling-wait primitive (the DAG runtime maps NotReady to
+	// it). A job carrying a snooze budget is the one exception: a snooze
+	// settled past its stamped deadline dead-letters instead (see
+	// driver.Store.Snooze).
 	OutcomeSnooze
+	// OutcomeSkip settles the job as StateSkipped via Store.Skip: terminal,
+	// deliberately-no-work, distinguishable in ops from a success that did
+	// work (the DAG runtime maps Skip to it).
+	OutcomeSkip
 )
 
 // Outcome is a consuming package's classification of a handler error. The
@@ -110,6 +116,30 @@ type Outcome struct {
 // injects its own (the queue's Abort/Retry/RetryAfter/Reportable taxonomy, the
 // event bus's Permanent).
 type Classifier func(error) Outcome
+
+// OutcomeError is the cross-runtime face of a runtime's error sentinels: the
+// private error types behind queue.Abort, dag.NotReady, event.Permanent and
+// friends implement it, so ANY runtime can classify a sentinel minted by
+// ANOTHER runtime's package with errors.As against this interface — a
+// handler migrating between runtimes keeps its failure behavior instead of
+// silently degrading (a dag.NotReady inside a workflow Operation used to
+// burn retry budget; now it snoozes there too).
+type OutcomeError interface {
+	error
+	// AsyncOutcome returns the engine settlement the sentinel encodes.
+	AsyncOutcome() Outcome
+}
+
+// ClassifyOutcome is the shared classifier every runtime's sentinel types
+// resolve through: an OutcomeError anywhere in err's chain decides the
+// outcome; anything else is a plain retry.
+func ClassifyOutcome(err error) Outcome {
+	var oe OutcomeError
+	if errors.As(err, &oe) {
+		return oe.AsyncOutcome()
+	}
+	return Outcome{Kind: OutcomeRetry}
+}
 
 // Kind registers one job kind on the engine: its limits, its handler and its
 // error classifier. Decoding and error taxonomy live with the consumer; the

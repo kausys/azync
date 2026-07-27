@@ -35,6 +35,20 @@ type fakeDAG struct {
 	// compensation that settles afterwards lands the workflow on cancelled
 	// instead of failed.
 	cancelRequested bool
+	// signals is the per-DAG inbox (azync_dag_signals): rows cascade with
+	// the DAG record, exactly like the FK does.
+	signals []*fakeDAGSignal
+}
+
+// fakeDAGSignal is one buffered signal delivery (a row of azync_dag_signals).
+type fakeDAGSignal struct {
+	id        uuid.UUID
+	name      string
+	messageID string
+	payload   json.RawMessage
+	consumed  bool
+	createdAt time.Time
+	seq       int64
 }
 
 // terminal reports whether the workflow reached a final state.
@@ -147,6 +161,7 @@ func (f *Fake) insertDAGTask(w *fakeDAG, tk driver.DAGTask, hasDeps bool, now ti
 			SignalName:       tk.SignalName,
 			CompensationKind: tk.CompensationKind,
 			IgnoreDeadDeps:   tk.IgnoreDeadDeps,
+			SnoozeBudget:     max(tk.Deadline, 0),
 		},
 		maxAttemptsExplicit: tk.MaxAttempts > 0,
 		compensationPayload: clonePayload(tk.CompensationPayload),
@@ -161,29 +176,113 @@ func (f *Fake) insertDAGTask(w *fakeDAG, tk driver.DAGTask, hasDeps bool, now ti
 
 // --- scheduler -------------------------------------------------------------
 
-// Signal completes waiting $signal tasks named name (payload as result) and
-// wakes named $sleep timers early.
-func (f *Fake) Signal(_ context.Context, dagID uuid.UUID, name string, payload json.RawMessage) (int64, error) {
+// Signal delivers (or buffers) one named signal on a live workflow: dedupe
+// by MessageID, immediate delivery to a waiting $signal / scheduled $sleep,
+// and durable buffering otherwise — mirroring azyncpgx's single transaction.
+func (f *Fake) Signal(_ context.Context, p driver.DAGSignalParams) (int64, bool, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	w := f.dags[p.DAGID]
+	if w == nil || w.terminal() {
+		return 0, false, driver.NewNotFound("signal dag")
+	}
+	if p.MessageID != "" {
+		for _, s := range w.signals {
+			if s.name == p.Name && s.messageID == p.MessageID {
+				return 0, true, nil
+			}
+		}
+	}
 	now := f.now()
-	var matched int64
+	sig := &fakeDAGSignal{
+		id: uuid.New(), name: p.Name, messageID: p.MessageID,
+		payload: clonePayload(p.Payload), createdAt: now, seq: f.nextSeq(),
+	}
+	w.signals = append(w.signals, sig)
+
+	delivered := f.deliverSignalNowLocked(w, sig, now)
+	return delivered, false, nil
+}
+
+// deliverSignalNowLocked attempts immediate delivery of sig to the workflow's
+// deliverable tasks, marking it consumed when anything matched. Callers hold
+// f.mu.
+func (f *Fake) deliverSignalNowLocked(w *fakeDAG, sig *fakeDAGSignal, now time.Time) int64 {
+	var delivered int64
 	for _, j := range f.jobs {
-		if j.Source != driver.SourceDAG || j.DAGID != dagID || j.SignalName != name {
+		if j.Source != driver.SourceDAG || j.DAGID != w.ID || j.SignalName != sig.name {
 			continue
 		}
 		switch {
 		case j.Kind == driver.KindSignal && j.State == driver.StateWaiting:
 			j.State = driver.StateSucceeded
-			j.Result = clonePayload(payload)
+			j.Result = clonePayload(sig.payload)
 			j.CompletedAt = now
-			matched++
+			delivered++
 		case j.Kind == driver.KindSleep && j.State == driver.StateScheduled:
 			j.RunAt = now
-			matched++
+			delivered++
 		}
 	}
-	return matched, nil
+	if delivered > 0 {
+		sig.consumed = true
+	}
+	return delivered
+}
+
+// DeliverBufferedSignals hands buffered inbox signals to tasks that became
+// deliverable after the signal arrived: per task, the oldest unconsumed
+// signal of its name wins. Set-based and idempotent, like the SQL statement.
+func (f *Fake) DeliverBufferedSignals(_ context.Context) (int64, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	now := f.now()
+	var delivered int64
+	for _, w := range f.dags {
+		if w.State != driver.DAGRunning && w.State != driver.DAGCompensating {
+			continue
+		}
+		for _, j := range f.jobs {
+			if j.Source != driver.SourceDAG || j.DAGID != w.ID || j.SignalName == "" {
+				continue
+			}
+			isSignal := j.Kind == driver.KindSignal && j.State == driver.StateWaiting
+			isSleep := j.Kind == driver.KindSleep && j.State == driver.StateScheduled
+			if !isSignal && !isSleep {
+				continue
+			}
+			oldest := oldestUnconsumedSignal(w, j.SignalName)
+			if oldest == nil {
+				continue
+			}
+			if isSignal {
+				j.State = driver.StateSucceeded
+				j.Result = clonePayload(oldest.payload)
+				j.CompletedAt = now
+			} else {
+				j.RunAt = now
+			}
+			oldest.consumed = true
+			delivered++
+		}
+	}
+	return delivered, nil
+}
+
+// oldestUnconsumedSignal returns the workflow's oldest unconsumed signal of
+// the name (created_at, then insertion order), or nil.
+func oldestUnconsumedSignal(w *fakeDAG, name string) *fakeDAGSignal {
+	var oldest *fakeDAGSignal
+	for _, s := range w.signals {
+		if s.consumed || s.name != name {
+			continue
+		}
+		if oldest == nil || s.createdAt.Before(oldest.createdAt) ||
+			(s.createdAt.Equal(oldest.createdAt) && s.seq < oldest.seq) {
+			oldest = s
+		}
+	}
+	return oldest
 }
 
 // PromoteUnblocked releases blocked tasks whose dependencies are all satisfied,
@@ -236,7 +335,7 @@ func (f *Fake) depsSatisfiedLocked(w *fakeDAG, j *fakeJob) bool {
 			return false
 		}
 		switch dep.State {
-		case driver.StateSucceeded:
+		case driver.StateSucceeded, driver.StateSkipped:
 		case driver.StateDead, driver.StateCancelled:
 			if !j.IgnoreDeadDeps {
 				return false
@@ -371,7 +470,8 @@ func (f *Fake) ignoredByAllDependentsLocked(w *fakeDAG, key string) bool {
 func (f *Fake) cancelRemainingTasksLocked(w *fakeDAG, now time.Time) {
 	for _, j := range f.dagJobsLocked(w.ID) {
 		switch j.State {
-		case driver.StatePending, driver.StateScheduled, driver.StateBlocked, driver.StateWaiting:
+		case driver.StatePending, driver.StateScheduled, driver.StateBlocked,
+			driver.StateWaiting, driver.StatePaused:
 			j.State = driver.StateCancelled
 			j.CompletedAt = now
 		default:
@@ -469,7 +569,7 @@ func (f *Fake) CompleteDAGs(_ context.Context) (int64, error) {
 			var deadKeys []string
 			for _, j := range tasks {
 				switch j.State {
-				case driver.StateSucceeded:
+				case driver.StateSucceeded, driver.StateSkipped:
 				case driver.StateDead:
 					deadKeys = append(deadKeys, j.TaskKey)
 					// A dead task is tolerated iff it has at least one dependent
@@ -561,19 +661,23 @@ func (f *Fake) CompleteDAGs(_ context.Context) (int64, error) {
 
 // TaskResults returns the persisted results of the workflow's succeeded tasks,
 // keyed by task key; an empty keys slice selects every succeeded task.
-func (f *Fake) TaskResults(_ context.Context, dagID uuid.UUID, keys []string) (map[string]json.RawMessage, error) {
+func (f *Fake) TaskResults(_ context.Context, dagID uuid.UUID, keys []string) (map[string]driver.TaskResult, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	want := sliceSet(keys)
-	out := map[string]json.RawMessage{}
+	out := map[string]driver.TaskResult{}
 	for _, j := range f.dagJobsLocked(dagID) {
-		if j.State != driver.StateSucceeded {
+		if j.State != driver.StateSucceeded && j.State != driver.StateSkipped {
 			continue
 		}
 		if len(keys) > 0 && !want[j.TaskKey] {
 			continue
 		}
-		out[j.TaskKey] = clonePayload(j.Result)
+		if j.State == driver.StateSkipped {
+			out[j.TaskKey] = driver.TaskResult{Skipped: true}
+			continue
+		}
+		out[j.TaskKey] = driver.TaskResult{Result: clonePayload(j.Result)}
 	}
 	return out, nil
 }
@@ -701,7 +805,21 @@ func (f *Fake) RetryDAG(_ context.Context, id uuid.UUID) error {
 		}
 		f.resetToPending(j)
 	}
-	if w.State == driver.DAGSuspended {
+	for _, j := range f.dagJobsLocked(id) {
+		if j.State != driver.StatePaused {
+			continue
+		}
+		// Back to the ready set per run_at, with a fresh snooze budget: time
+		// spent paused must not burn the wait deadline.
+		if j.RunAt.After(now) {
+			j.State = driver.StateScheduled
+		} else {
+			j.State = driver.StatePending
+			f.wake(j.Source, j.Kind)
+		}
+		j.DeadlineAt = time.Time{}
+	}
+	if w.State == driver.DAGSuspended || w.State == driver.DAGPaused {
 		if hasComps {
 			w.State = driver.DAGCompensating
 		} else {
@@ -713,13 +831,48 @@ func (f *Fake) RetryDAG(_ context.Context, id uuid.UUID) error {
 	return nil
 }
 
+// FindDAGByKey resolves the live workflow holding (name, idempotencyKey).
+func (f *Fake) FindDAGByKey(_ context.Context, name, idempotencyKey string) (uuid.UUID, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	for _, w := range f.dags {
+		if w.Name == name && w.IdempotencyKey == idempotencyKey && !w.terminal() {
+			return w.ID, nil
+		}
+	}
+	return uuid.Nil, driver.NewNotFound("find dag by key")
+}
+
+// PauseDAG freezes a running workflow: header to paused with the reason
+// recorded, pending/scheduled tasks to paused. Blocked and waiting tasks
+// keep their states; nothing promotes while paused.
+func (f *Fake) PauseDAG(_ context.Context, id uuid.UUID, reason string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	w := f.dags[id]
+	if w == nil || w.State != driver.DAGRunning {
+		return driver.NewNotFound("pause dag")
+	}
+	now := f.now()
+	for _, j := range f.dagJobsLocked(id) {
+		if j.State == driver.StatePending || j.State == driver.StateScheduled {
+			j.State = driver.StatePaused
+		}
+	}
+	w.State = driver.DAGPaused
+	w.FailureReason = reason
+	w.UpdatedAt = now
+	return nil
+}
+
 // CompensateDAG manually triggers compensation on a running or suspended
 // workflow, exactly like the cancel policy.
 func (f *Fake) CompensateDAG(_ context.Context, id uuid.UUID) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	w := f.dags[id]
-	if w == nil || (w.State != driver.DAGRunning && w.State != driver.DAGSuspended) {
+	if w == nil || (w.State != driver.DAGRunning && w.State != driver.DAGSuspended &&
+		w.State != driver.DAGPaused) {
 		return driver.NewNotFound("compensate dag")
 	}
 	now := f.now()

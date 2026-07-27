@@ -4,7 +4,7 @@ Durable CQRS-style event bus on the same [`azync.Core`](README.md) as queue.
 
 `Publish` appends to an insert-only ledger (`azync_events`) and, in the same transaction, fans out one delivery job per matching subscriber (`source=event`). On dequeue, the payload is rehydrated from the ledger — that is what makes admin Replay possible without keeping the original publish call around.
 
-Package notes: [`event/README.md`](event/README.md) · Examples: [`examples/event-basic`](examples/event-basic), projector in [`examples/shared-core`](examples/shared-core)
+Package notes: [`event/README.md`](event/README.md) · Examples: [`examples/event-basic`](https://github.com/kausys/azync/tree/main/examples/event-basic), projector in [`examples/shared-core`](https://github.com/kausys/azync/tree/main/examples/shared-core)
 
 ## Install / compose
 
