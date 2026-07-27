@@ -36,6 +36,35 @@ func (m *Manager) Cancel(ctx context.Context, id uuid.UUID) error {
 	return m.store.CancelWorkflowExecution(ctx, id)
 }
 
+// Suspend parks a non-terminal execution: no workflow-task replays until
+// Resume (the worker consumes any task that arrives while suspended). The
+// reason lands in the execution's failure reason, alertable via Get. The
+// operator-freeze verb — say, while the code fix for a determinism violation
+// deploys, or a downstream provider is out. It returns a not-found error for
+// a missing or terminal execution.
+func (m *Manager) Suspend(ctx context.Context, id uuid.UUID, reason string) error {
+	return m.store.SuspendWorkflow(ctx, id, reason)
+}
+
+// Resume returns a suspended execution to running AND re-enqueues its
+// workflow-task immediately — the second half is load-bearing: the worker
+// consumed (acked) any task that arrived during the suspension, so flipping
+// the state alone would strand the execution until the stalled-workflow
+// reconciler eventually rescued it. This is the documented recovery path for
+// a replay-error suspension: fix the code (new version), deploy, Resume. It
+// returns a not-found error for a missing execution or one in any state but
+// suspended.
+func (m *Manager) Resume(ctx context.Context, id uuid.UUID) error {
+	view, err := m.store.GetWorkflowExecution(ctx, id)
+	if err != nil {
+		return err
+	}
+	if err := m.store.ResumeWorkflow(ctx, id); err != nil {
+		return err
+	}
+	return enqueueWorkflowTask(ctx, m.store, view.Name, id, time.Time{})
+}
+
 // ResolveUncertain applies an audited decision to an Operation in the
 // uncertain state (docs/workflow-v1-spec.md §8):
 //

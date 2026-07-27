@@ -10,9 +10,9 @@ import (
 	"github.com/kausys/azync/internal/engine"
 )
 
-// Worker is the workflow runtime: per-kind fetch loops feeding an executor
+// Worker is the DAG task runtime: per-kind fetch loops feeding an executor
 // pool on the shared engine, the engine's maintenance loops (promotion,
-// reaper, vacuums — scoped to the workflow source), and the workflow scheduler
+// reaper, vacuums — scoped to the dag source), and the DAG scheduler
 // loop that drives the DAG machinery. Handlers register via Register /
 // RegisterKind before Start; the internal Sleep and WaitSignal tasks are never
 // registered — the scheduler resolves them without running any handler.
@@ -45,7 +45,7 @@ func (w *Worker) Wait(ctx context.Context) error {
 }
 
 // Start runs the worker until ctx is cancelled: the shared engine (fetch,
-// execute, settle, maintenance) plus the workflow scheduler loop. The
+// execute, settle, maintenance) plus the DAG scheduler loop. The
 // scheduler is set-based and idempotent, so every worker instance runs it on
 // its own tick without leader election. On cancellation in-flight tasks drain
 // for up to the shutdown drain budget.
@@ -90,14 +90,20 @@ func (w *Worker) schedulerLoop(ctx context.Context) {
 }
 
 // schedulerPass runs one set-based scheduler pass, in the contract's order:
-// PromoteUnblocked releases tasks whose dependencies settled, CompleteDueSleeps
-// finishes due timers, ApplyFailurePolicy reacts to dead tasks, and only then
-// CompleteDAGs settles finished dags. The order is load-bearing —
-// completion decides succeeded/failed from what the policy left behind, so the
-// policy MUST run first; never reorder these calls.
+// PromoteUnblocked releases tasks whose dependencies settled,
+// DeliverBufferedSignals hands buffered signals to tasks that just became
+// deliverable (a signal buffered while its task was blocked lands here, and a
+// woken $sleep is due for the very next step), CompleteDueSleeps finishes due
+// timers, ApplyFailurePolicy reacts to dead tasks, and only then CompleteDAGs
+// settles finished dags. The order is load-bearing — completion decides
+// succeeded/failed from what the policy left behind, so the policy MUST run
+// first; never reorder these calls.
 func (w *Worker) schedulerPass(ctx context.Context) {
 	if _, err := w.store.PromoteUnblocked(ctx); err != nil && ctx.Err() == nil {
 		w.logger.Error("dag promote unblocked failed", "error", err)
+	}
+	if _, err := w.store.DeliverBufferedSignals(ctx); err != nil && ctx.Err() == nil {
+		w.logger.Error("dag deliver buffered signals failed", "error", err)
 	}
 	if _, err := w.store.CompleteDueSleeps(ctx); err != nil && ctx.Err() == nil {
 		w.logger.Error("dag complete due sleeps failed", "error", err)

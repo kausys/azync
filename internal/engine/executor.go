@@ -77,11 +77,13 @@ func (e *Engine) execute(jobsCtx context.Context, k Kind, job driver.Job, releas
 }
 
 // settleFailure lands a failed execution: Snooze parks the job budget-free
-// (checked before exhaustion — a snooze never consumes an attempt, so it can
-// never dead-letter); Abort or an exhausted budget goes to the dead letter;
-// everything else reschedules after the classified delay (or the exponential
-// backoff). Settle errors are logged, never fatal: a stale lease token means
-// another worker already owns the job.
+// (checked before exhaustion — a snooze never consumes an attempt, so the
+// retry budget can never dead-letter it; a stamped snooze deadline can, and
+// the driver escalates that atomically inside Snooze itself); Abort or an
+// exhausted budget goes to the dead letter; everything else reschedules
+// after the classified delay (or the exponential backoff). Settle errors are
+// logged, never fatal: a stale lease token means another worker already owns
+// the job.
 func (e *Engine) settleFailure(ctx context.Context, k Kind, job driver.Job, err error, elapsed time.Duration) {
 	logger := e.logger.With("job", job.ID.String(), "kind", job.Kind, "attempt", job.Attempt)
 
@@ -90,11 +92,27 @@ func (e *Engine) settleFailure(ctx context.Context, k Kind, job driver.Job, err 
 
 	switch {
 	case o.Kind == OutcomeSnooze:
-		if sErr := e.store.Snooze(ctx, job.ID, job.LeaseToken, o.Delay); sErr != nil {
+		deadlined, sErr := e.store.Snooze(ctx, job.ID, job.LeaseToken, o.Delay,
+			"snooze deadline exceeded: "+err.Error())
+		switch {
+		case sErr != nil:
 			logSettleError(logger, sErr, "snooze failed", "error", sErr)
+			e.metrics.recordSettled(ctx, job.Kind, "snoozed", elapsed)
+		case deadlined:
+			logger.Warn("job snooze deadline exceeded, dead-lettered",
+				"deadline", job.DeadlineAt, "error", err)
+			e.metrics.recordSettled(ctx, job.Kind, "dead", elapsed)
+		default:
+			logger.Debug("job snoozed", "delay", o.Delay, "error", err)
+			e.metrics.recordSettled(ctx, job.Kind, "snoozed", elapsed)
 		}
-		logger.Debug("job snoozed", "delay", o.Delay, "error", err)
-		e.metrics.recordSettled(ctx, job.Kind, "snoozed", elapsed)
+
+	case o.Kind == OutcomeSkip:
+		if sErr := e.store.Skip(ctx, job.ID, job.LeaseToken, err.Error()); sErr != nil {
+			logSettleError(logger, sErr, "skip failed", "error", sErr)
+		}
+		logger.Debug("job skipped", "reason", err)
+		e.metrics.recordSettled(ctx, job.Kind, "skipped", elapsed)
 
 	case o.Kind == OutcomeAbort:
 		if dErr := e.store.Dead(ctx, job.ID, job.LeaseToken, err.Error()); dErr != nil {

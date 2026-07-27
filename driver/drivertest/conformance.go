@@ -45,6 +45,7 @@ func RunConformance(t *testing.T, newStore func(t *testing.T) driver.Store) {
 	t.Run("Dequeue", func(t *testing.T) { runDequeue(t, store) })
 	t.Run("Settlement", func(t *testing.T) { runSettlement(t, store) })
 	t.Run("Snooze", func(t *testing.T) { runSnooze(t, store) })
+	t.Run("RunNow", func(t *testing.T) { runRunNow(t, store) })
 	t.Run("ReapExpired", func(t *testing.T) { runReap(t, store) })
 	t.Run("PromoteDue", func(t *testing.T) { runPromoteDue(t, store) })
 	t.Run("Publish", func(t *testing.T) { runPublish(t, store) })
@@ -435,7 +436,9 @@ func runSnooze(t *testing.T, store driver.Store) {
 		is.Len(leased, 1)
 		is.Equal(1, leased[0].Attempt)
 
-		is.NoError(store.Snooze(ctx, leased[0].ID, leased[0].LeaseToken, time.Hour))
+		deadlined, err := store.Snooze(ctx, leased[0].ID, leased[0].LeaseToken, time.Hour, "budget exceeded")
+		is.NoError(err)
+		is.False(deadlined, "a job without a snooze budget never deadlines")
 		got := getJob(ctx, t, store, driver.SourceQueue, id)
 		is.Equal(driver.StateScheduled, got.State)
 		is.Equal(0, got.Attempt, "snooze hands back the attempt: the budget is not consumed")
@@ -451,7 +454,7 @@ func runSnooze(t *testing.T, store driver.Store) {
 		leased := dequeueN(ctx, t, store, driver.SourceQueue, "snz_fence", 1, time.Minute)
 		is.Len(leased, 1)
 		is.NoError(store.Ack(ctx, leased[0].ID, leased[0].LeaseToken))
-		err := store.Snooze(ctx, id, leased[0].LeaseToken, time.Minute)
+		_, err := store.Snooze(ctx, id, leased[0].LeaseToken, time.Minute, "budget exceeded")
 		is.True(driver.IsNotFound(err), "a stale snooze is fenced")
 		is.Equal(driver.StateSucceeded, getJob(ctx, t, store, driver.SourceQueue, id).State, "the earlier Ack stands")
 	})
@@ -461,7 +464,8 @@ func runSnooze(t *testing.T, store driver.Store) {
 		id := enqueueDue(ctx, t, store, "snz_due")
 		first := dequeueN(ctx, t, store, driver.SourceQueue, "snz_due", 1, time.Minute)
 		is.Len(first, 1)
-		is.NoError(store.Snooze(ctx, first[0].ID, first[0].LeaseToken, 0))
+		_, err := store.Snooze(ctx, first[0].ID, first[0].LeaseToken, 0, "budget exceeded")
+		is.NoError(err)
 
 		// run_at was stamped at the backend clock's now(), so the job promotes
 		// and re-leases immediately regardless of host/DB clock skew.
@@ -999,4 +1003,43 @@ func runNukeAll(t *testing.T, store driver.Store) {
 	_, err = store.GetEvent(ctx, eventID)
 	is.NoError(err, "NukeAll(queue) leaves the event ledger intact")
 	is.Len(dequeueN(ctx, t, store, driver.SourceEvent, "nuke_s", 10, time.Minute), 1, "NukeAll(queue) leaves event deliveries intact")
+}
+
+// ---- RunNow ----------------------------------------------------------------
+
+// runRunNow pins the expedite verb: a scheduled job (a snooze, a backoff, a
+// future enqueue) moves to pending with run_at = now; any other state is
+// not-found.
+func runRunNow(t *testing.T, store driver.Store) {
+	t.Helper()
+	ctx := context.Background()
+	is := require.New(t)
+
+	// A snoozed job is the canonical target: park it an hour out, expedite it,
+	// and it leases again immediately.
+	id := enqueueDue(ctx, t, store, "rn_snoozed")
+	leased := dequeueN(ctx, t, store, driver.SourceQueue, "rn_snoozed", 1, time.Minute)
+	is.Len(leased, 1)
+	_, err := store.Snooze(ctx, leased[0].ID, leased[0].LeaseToken, time.Hour, "budget exceeded")
+	is.NoError(err)
+	is.Equal(driver.StateScheduled, getJob(ctx, t, store, driver.SourceQueue, id).State)
+
+	is.NoError(store.RunNow(ctx, driver.SourceQueue, id))
+	got := getJob(ctx, t, store, driver.SourceQueue, id)
+	is.Equal(driver.StatePending, got.State)
+	release := dequeueN(ctx, t, store, driver.SourceQueue, "rn_snoozed", 1, time.Minute)
+	is.Len(release, 1, "the expedited job is immediately leasable")
+	is.Equal(id, release[0].ID)
+
+	// Guard rails: pending, active and settled jobs are not expeditable.
+	is.True(driver.IsNotFound(store.RunNow(ctx, driver.SourceQueue, release[0].ID)),
+		"an active job is not expeditable")
+	is.NoError(store.Ack(ctx, release[0].ID, release[0].LeaseToken))
+	is.True(driver.IsNotFound(store.RunNow(ctx, driver.SourceQueue, id)),
+		"a succeeded job is not expeditable")
+	pendingID := enqueueDue(ctx, t, store, "rn_pending")
+	is.True(driver.IsNotFound(store.RunNow(ctx, driver.SourceQueue, pendingID)),
+		"an already-pending job is not expeditable")
+	is.True(driver.IsNotFound(store.RunNow(ctx, driver.SourceQueue, uuid.New())),
+		"a missing job is not-found")
 }

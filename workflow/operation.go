@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/kausys/azync/driver"
+	"github.com/kausys/azync/internal/engine"
 	"github.com/kausys/azync/workflow/kernel"
 
 	"github.com/google/uuid"
@@ -228,8 +229,66 @@ func (w *Worker) processOperationJob(ctx context.Context, job driver.Job) error 
 	}
 
 	if runErr != nil {
+		// Cross-runtime sentinels (engine.OutcomeError: dag.NotReady,
+		// dag.Abort/queue.Abort, event.Permanent, dag.Skip, ...) keep their
+		// declared semantics inside an Operation instead of degrading to a
+		// generic budget-burning retry.
+		switch o := engine.ClassifyOutcome(runErr); o.Kind {
+		case engine.OutcomeSnooze:
+			// The polling-wait primitive: park with the sentinel's own delay,
+			// hand the attempt back, no history — the Operation re-runs later
+			// as if this lease never happened. A snooze deadline stamped on
+			// the job escalates inside Snooze itself (deadlined settles dead);
+			// the workflow then observes the dead Operation via the ordinary
+			// failed path on the reconciled wake.
+			deadlined, err := w.jobs.Snooze(ctx, job.ID, job.LeaseToken, o.Delay,
+				"snooze deadline exceeded: "+runErr.Error())
+			if driver.IsNotFound(err) {
+				return nil
+			}
+			if err != nil {
+				return err
+			}
+			if deadlined {
+				w.appendOpFailed(ctx, job.RunID, body, "snooze deadline exceeded: "+runErr.Error())
+				return w.wakeWorkflow(ctx, body.WorkflowName, job.RunID)
+			}
+			return nil
+		case engine.OutcomeAbort:
+			// Permanent: skip the remaining retries, fail the Operation now.
+			w.appendOpFailed(ctx, job.RunID, body, runErr.Error())
+			if err := w.jobs.Dead(ctx, job.ID, job.LeaseToken, runErr.Error()); err != nil {
+				if driver.IsNotFound(err) {
+					return nil
+				}
+				return err
+			}
+			return w.wakeWorkflow(ctx, body.WorkflowName, job.RunID)
+		case engine.OutcomeSkip:
+			// A deliberate no-op completes the Operation with a null result:
+			// the workflow's Future resolves successfully with nothing in it.
+			rp := operationResultPayload{
+				Name: body.Name, Version: body.Version, ExecutionKey: body.ExecutionKey,
+			}
+			if _, err := w.store.AppendHistory(ctx, job.RunID, string(kernel.EventOperationCompleted), marshalOrPanic(rp)); err != nil {
+				return w.safeRelease(ctx, job)
+			}
+			if err := w.jobs.Skip(ctx, job.ID, job.LeaseToken, runErr.Error()); err != nil {
+				if driver.IsNotFound(err) {
+					return nil
+				}
+				return err
+			}
+			return w.wakeWorkflow(ctx, body.WorkflowName, job.RunID)
+		case engine.OutcomeRetry:
+			// Fall through to the ordinary retry/dead path below.
+		}
 		if job.Attempt < job.MaxAttempts {
-			err := w.jobs.Reschedule(ctx, job.ID, job.LeaseToken, w.cfg.operationRetryDelay, runErr.Error())
+			delay := w.cfg.operationRetryDelay
+			if d := engine.ClassifyOutcome(runErr).Delay; d > 0 {
+				delay = d // RetryAfter's fixed delay is honored here too
+			}
+			err := w.jobs.Reschedule(ctx, job.ID, job.LeaseToken, delay, runErr.Error())
 			if driver.IsNotFound(err) {
 				return nil
 			}

@@ -227,10 +227,10 @@ func TestDiamondPromotesCascadeAndFlowsResults(t *testing.T) {
 
 	results, err := f.TaskResults(context.Background(), res.ID, nil)
 	is.NoError(err)
-	is.JSONEq(`{"sum":2}`, string(results["a"]))
-	is.JSONEq(`{"sum":20}`, string(results["b"]))
-	is.JSONEq(`{"sum":200}`, string(results["c"]))
-	is.JSONEq(`{"sum":220}`, string(results["d"]))
+	is.JSONEq(`{"sum":2}`, string(results["a"].Result))
+	is.JSONEq(`{"sum":20}`, string(results["b"].Result))
+	is.JSONEq(`{"sum":200}`, string(results["c"].Result))
+	is.JSONEq(`{"sum":220}`, string(results["d"].Result))
 }
 
 // The barrier test: n upstream dags all try to start the same downstream

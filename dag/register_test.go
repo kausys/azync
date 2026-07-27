@@ -146,7 +146,7 @@ func TestRegisterKindPersistsRawResultAndExposesContext(t *testing.T) {
 	}, 2*time.Second, 2*time.Millisecond)
 	results, err := f.TaskResults(context.Background(), id, nil)
 	is.NoError(err)
-	is.JSONEq(`{"ok":true}`, string(results["t"]), "the raw result is persisted verbatim")
+	is.JSONEq(`{"ok":true}`, string(results["t"].Result), "the raw result is persisted verbatim")
 }
 
 func TestReportableDiesWhenBudgetExhausts(t *testing.T) {

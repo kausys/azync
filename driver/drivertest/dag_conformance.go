@@ -3,6 +3,7 @@ package drivertest
 import (
 	"context"
 	"encoding/json"
+	"strings"
 	"testing"
 	"time"
 
@@ -49,6 +50,14 @@ func RunDAGConformance(t *testing.T, newStore func(t *testing.T) driver.Store) {
 	t.Run("InternalKindsStayInternal", func(t *testing.T) { runDAGInternalKinds(t, store, ws) })
 	t.Run("Vacuum", func(t *testing.T) { runDAGVacuum(t, store, ws) })
 	t.Run("CompletedVacuumExemptsDAGTasks", func(t *testing.T) { runDAGCompletedVacuumExemption(t, store, ws) })
+	t.Run("SnoozeDeadline", func(t *testing.T) { runDAGSnoozeDeadline(t, store, ws) })
+	t.Run("SignalBufferedBeforeWaitDeliversOnPromotion", func(t *testing.T) { runDAGSignalBuffered(t, store, ws) })
+	t.Run("SignalDedupeByMessageID", func(t *testing.T) { runDAGSignalDedupe(t, store, ws) })
+	t.Run("SignalMissingOrTerminalDAGIsNotFound", func(t *testing.T) { runDAGSignalTerminal(t, store, ws) })
+	t.Run("SignalSleepEarlyWakeDeferred", func(t *testing.T) { runDAGSignalSleepBuffered(t, store, ws) })
+	t.Run("SkipSettlesTerminalAndSatisfiesDeps", func(t *testing.T) { runDAGSkip(t, store, ws) })
+	t.Run("PauseFreezesAndRetryResumes", func(t *testing.T) { runDAGPause(t, store, ws) })
+	t.Run("FindDAGByKeyResolvesTheLiveRun", func(t *testing.T) { runDAGFindByKey(t, store, ws) })
 }
 
 // ---- shared helpers -------------------------------------------------------
@@ -289,9 +298,10 @@ func runDAGSleep(t *testing.T, _ driver.Store, ws driver.DAGStore) {
 	is.Equal(driver.StateScheduled, wfTaskByKey(ctx, t, ws, id, "long").State, "an unexpired sleep stays scheduled")
 
 	// A signal wakes the named sleep early.
-	matched, err := ws.Signal(ctx, id, "hurry", nil)
+	delivered, dedup, err := ws.Signal(ctx, driver.DAGSignalParams{DAGID: id, Name: "hurry"})
 	is.NoError(err)
-	is.Equal(int64(1), matched)
+	is.False(dedup)
+	is.Equal(int64(1), delivered)
 	_, err = ws.CompleteDueSleeps(ctx)
 	is.NoError(err)
 	is.Equal(driver.StateSucceeded, wfTaskByKey(ctx, t, ws, id, "long").State, "the woken sleep completes at once")
@@ -309,25 +319,33 @@ func runDAGSignal(t *testing.T, _ driver.Store, ws driver.DAGStore) {
 		Tasks: []driver.DAGTask{{Key: "g", Kind: driver.KindSignal, SignalName: "approved"}},
 	})
 
-	matched, err := ws.Signal(ctx, id, "other", json.RawMessage(`{}`))
+	delivered, dedup, err := ws.Signal(ctx, driver.DAGSignalParams{
+		DAGID: id, Name: "other", Payload: json.RawMessage(`{}`),
+	})
 	is.NoError(err)
-	is.Zero(matched, "an unmatched signal name touches nothing")
+	is.False(dedup)
+	is.Zero(delivered, "an unmatched signal name is buffered, not lost — and delivers nothing now")
 
 	payload := json.RawMessage(`{"by":"ops"}`)
-	matched, err = ws.Signal(ctx, id, "approved", payload)
+	delivered, dedup, err = ws.Signal(ctx, driver.DAGSignalParams{
+		DAGID: id, Name: "approved", Payload: payload,
+	})
 	is.NoError(err)
-	is.Equal(int64(1), matched)
+	is.False(dedup)
+	is.Equal(int64(1), delivered)
 	g := wfTaskByKey(ctx, t, ws, id, "g")
 	is.Equal(driver.StateSucceeded, g.State)
 	is.JSONEq(string(payload), string(g.Result), "the signal payload is the task's result")
 
-	matched, err = ws.Signal(ctx, id, "approved", payload)
+	delivered, _, err = ws.Signal(ctx, driver.DAGSignalParams{
+		DAGID: id, Name: "approved", Payload: payload,
+	})
 	is.NoError(err)
-	is.Zero(matched, "a consumed signal has nothing left to match")
+	is.Zero(delivered, "a completed signal task never re-delivers; the repeat stays buffered")
 
 	results, err := ws.TaskResults(ctx, id, []string{"g"})
 	is.NoError(err)
-	is.JSONEq(string(payload), string(results["g"]), "the result is visible through TaskResults")
+	is.JSONEq(string(payload), string(results["g"].Result), "the result is visible through TaskResults")
 }
 
 // ---- Failure policy: cancel -----------------------------------------------
@@ -738,8 +756,9 @@ func runDAGTaskResults(t *testing.T, store driver.Store, ws driver.DAGStore) {
 	results, err := ws.TaskResults(ctx, id, []string{"a", "b", "c"})
 	is.NoError(err)
 	is.Len(results, 2, "an unfinished task has no result entry")
-	is.JSONEq(`{"n":7}`, string(results["a"]))
-	is.Nil(results["b"], "a succeeded task without a result maps to nil")
+	is.JSONEq(`{"n":7}`, string(results["a"].Result))
+	is.Nil(results["b"].Result, "a succeeded task without a result maps to a nil Result")
+	is.False(results["b"].Skipped, "succeeded-without-result is not skipped")
 
 	results, err = ws.TaskResults(ctx, id, []string{"a"})
 	is.NoError(err)
@@ -885,8 +904,453 @@ func runDAGCompletedVacuumExemption(t *testing.T, store driver.Store, ws driver.
 	is.Equal(driver.StateSucceeded, a.State, "the succeeded upstream task row survives")
 	results, err := ws.TaskResults(ctx, id, []string{"a"})
 	is.NoError(err)
-	is.JSONEq(`{"n":1}`, string(results["a"]), "its persisted result survives, so ResultOf still resolves it")
+	is.JSONEq(`{"n":1}`, string(results["a"].Result), "its persisted result survives, so ResultOf still resolves it")
 
 	_, err = store.GetJob(ctx, driver.SourceQueue, queueID)
 	is.True(driver.IsNotFound(err), "the plain queue job of the same age is gone")
+}
+
+// ---- Snooze deadline --------------------------------------------------------
+
+// runDAGSnoozeDeadline pins the bounded-NotReady contract: a task with a
+// Deadline stamps deadline_at on its FIRST snooze (the budget measures time
+// spent waiting, not the workflow's age), parks normally before the deadline,
+// dead-letters atomically on a snooze past it (final attempt recorded, the
+// failure policy reacts), and RetryDAG clears the stamped deadline so the
+// retried wait starts with a fresh budget instead of instantly re-dying.
+func runDAGSnoozeDeadline(t *testing.T, store driver.Store, ws driver.DAGStore) {
+	t.Helper()
+	ctx := context.Background()
+
+	t.Run("escalates to dead past the deadline and the policy reacts", func(t *testing.T) {
+		is := require.New(t)
+		task := wfTask("wait", "wfc_ddl_wait")
+		task.Deadline = reapLease // expires within the test
+		id := createWF(ctx, t, ws, driver.DAGParams{
+			Name: "wfc_ddl", OnFailure: driver.OnFailureSuspend,
+			Tasks: []driver.DAGTask{task},
+		})
+
+		// First snooze stamps the deadline and parks normally.
+		leased := dequeueN(ctx, t, store, driver.SourceDAG, "wfc_ddl_wait", 1, time.Minute)
+		is.Len(leased, 1)
+		is.True(leased[0].DeadlineAt.IsZero(), "no deadline is stamped before the first snooze")
+		deadlined, err := store.Snooze(ctx, leased[0].ID, leased[0].LeaseToken, 0, "not ready")
+		is.NoError(err)
+		is.False(deadlined, "the stamping snooze itself never escalates")
+		stamped := wfTaskByKey(ctx, t, ws, id, "wait")
+		is.Equal(driver.StateScheduled, stamped.State)
+		is.False(stamped.DeadlineAt.IsZero(), "the first snooze stamped the deadline")
+
+		// Past the deadline, the next snooze dead-letters atomically.
+		time.Sleep(reapWait)
+		_, err = store.PromoteDue(ctx, driver.SourceDAG, []string{"wfc_ddl_wait"})
+		is.NoError(err)
+		leased = dequeueN(ctx, t, store, driver.SourceDAG, "wfc_ddl_wait", 1, time.Minute)
+		is.Len(leased, 1)
+		deadlined, err = store.Snooze(ctx, leased[0].ID, leased[0].LeaseToken, 0, "snooze deadline exceeded: still not ready")
+		is.NoError(err)
+		is.True(deadlined, "a snooze past the stamped deadline escalates")
+
+		dead := wfTaskByKey(ctx, t, ws, id, "wait")
+		is.Equal(driver.StateDead, dead.State)
+		is.Contains(dead.LastError, "snooze deadline exceeded")
+		attempts, err := store.JobAttempts(ctx, driver.SourceDAG, dead.ID)
+		is.NoError(err)
+		is.Len(attempts, 1, "the deadline death records the final attempt")
+
+		failure := applyPolicyFor(ctx, t, ws, id)
+		is.Equal(driver.OnFailureSuspend, failure.Policy)
+		is.Equal(driver.DAGSuspended, wfView(ctx, t, ws, id).State)
+
+		// Retry grants a fresh wait budget: the cleared deadline re-stamps on
+		// the next first snooze instead of instantly re-killing the task.
+		is.NoError(ws.RetryDAG(ctx, id))
+		retried := wfTaskByKey(ctx, t, ws, id, "wait")
+		is.Equal(driver.StatePending, retried.State)
+		is.True(retried.DeadlineAt.IsZero(), "RetryDAG drops the stamped deadline")
+		leased = dequeueN(ctx, t, store, driver.SourceDAG, "wfc_ddl_wait", 1, time.Minute)
+		is.Len(leased, 1)
+		deadlined, err = store.Snooze(ctx, leased[0].ID, leased[0].LeaseToken, 0, "not ready")
+		is.NoError(err)
+		is.False(deadlined, "the retried wait parks again instead of dying")
+	})
+
+	t.Run("parks normally before the deadline", func(t *testing.T) {
+		is := require.New(t)
+		task := wfTask("wait", "wfc_ddl_early")
+		task.Deadline = time.Hour
+		id := createWF(ctx, t, ws, driver.DAGParams{
+			Name: "wfc_ddl_early", Tasks: []driver.DAGTask{task},
+		})
+		leased := dequeueN(ctx, t, store, driver.SourceDAG, "wfc_ddl_early", 1, time.Minute)
+		is.Len(leased, 1)
+		is.Equal(time.Hour, leased[0].SnoozeBudget, "the declared budget travels on the job")
+		deadlined, err := store.Snooze(ctx, leased[0].ID, leased[0].LeaseToken, time.Minute, "not ready")
+		is.NoError(err)
+		is.False(deadlined)
+		got := wfTaskByKey(ctx, t, ws, id, "wait")
+		is.Equal(driver.StateScheduled, got.State)
+		is.Zero(got.Attempt, "a pre-deadline snooze still hands the attempt back")
+	})
+}
+
+// ---- Buffered signals -------------------------------------------------------
+
+// runDAGSignalBuffered pins the durable-signal contract: a signal sent while
+// its $signal task is still blocked is accepted and buffered (delivered=0,
+// dedup=false, nil error), then handed to the task by DeliverBufferedSignals
+// once promotion makes it deliverable — with the payload as the result. A
+// second pass is idempotent.
+func runDAGSignalBuffered(t *testing.T, store driver.Store, ws driver.DAGStore) {
+	t.Helper()
+	ctx := context.Background()
+	is := require.New(t)
+
+	id := createWF(ctx, t, ws, driver.DAGParams{
+		Name: "wfc_sigbuf",
+		Tasks: []driver.DAGTask{
+			wfTask("gate", "wfc_sigbuf_gate"),
+			{Key: "approval", Kind: driver.KindSignal, SignalName: "approval"},
+		},
+		Deps: []driver.DAGDep{{TaskKey: "approval", DependsOnKey: "gate"}},
+	})
+
+	payload := json.RawMessage(`{"by":"ops"}`)
+	delivered, dedup, err := ws.Signal(ctx, driver.DAGSignalParams{
+		DAGID: id, Name: "approval", Payload: payload,
+	})
+	is.NoError(err, "a signal with nothing deliverable is accepted, not an error")
+	is.False(dedup)
+	is.Zero(delivered, "nothing was deliverable yet: the signal buffered")
+	is.Equal(driver.StateBlocked, wfTaskByKey(ctx, t, ws, id, "approval").State,
+		"the buffered signal must not touch a blocked task")
+
+	// Unblock and promote: the wait becomes deliverable, and the buffered
+	// signal lands on the very next DeliverBufferedSignals pass.
+	finishWFTask(ctx, t, store, ws, "wfc_sigbuf_gate", nil)
+	promoteUnblocked(ctx, t, ws)
+	is.Equal(driver.StateWaiting, wfTaskByKey(ctx, t, ws, id, "approval").State)
+
+	n, err := ws.DeliverBufferedSignals(ctx)
+	is.NoError(err)
+	is.GreaterOrEqual(n, int64(1))
+	g := wfTaskByKey(ctx, t, ws, id, "approval")
+	is.Equal(driver.StateSucceeded, g.State, "the buffered signal delivered on promotion")
+	is.JSONEq(string(payload), string(g.Result))
+
+	n, err = ws.DeliverBufferedSignals(ctx)
+	is.NoError(err)
+	is.Zero(n, "a second pass is idempotent: the signal was consumed")
+}
+
+// runDAGSignalDedupe pins MessageID dedupe: a repeat of the same id is
+// accepted and dropped (deduplicated=true, no effects), the delivered result
+// is the FIRST payload, and an empty MessageID disables dedupe entirely.
+func runDAGSignalDedupe(t *testing.T, _ driver.Store, ws driver.DAGStore) {
+	t.Helper()
+	ctx := context.Background()
+	is := require.New(t)
+
+	id := createWF(ctx, t, ws, driver.DAGParams{
+		Name: "wfc_sigdedupe",
+		Tasks: []driver.DAGTask{
+			{Key: "gate", Kind: driver.KindSignal, SignalName: "gate"},
+			{Key: "late", Kind: driver.KindSignal, SignalName: "late"},
+		},
+		Deps: []driver.DAGDep{{TaskKey: "late", DependsOnKey: "gate"}},
+	})
+
+	// Dedupe on a buffered (not yet deliverable) signal: the repeat with a
+	// different body must be dropped, and delivery uses the FIRST payload.
+	first := json.RawMessage(`{"decision":"approve"}`)
+	delivered, dedup, err := ws.Signal(ctx, driver.DAGSignalParams{
+		DAGID: id, Name: "late", MessageID: "wh-1", Payload: first,
+	})
+	is.NoError(err)
+	is.False(dedup)
+	is.Zero(delivered)
+	delivered, dedup, err = ws.Signal(ctx, driver.DAGSignalParams{
+		DAGID: id, Name: "late", MessageID: "wh-1", Payload: json.RawMessage(`{"decision":"tampered"}`),
+	})
+	is.NoError(err)
+	is.True(dedup, "a repeat MessageID is deduplicated")
+	is.Zero(delivered)
+
+	// Without a MessageID there is no dedupe: both inserts are accepted (the
+	// first delivers immediately on the waiting gate).
+	delivered, dedup, err = ws.Signal(ctx, driver.DAGSignalParams{DAGID: id, Name: "gate"})
+	is.NoError(err)
+	is.False(dedup)
+	is.Equal(int64(1), delivered)
+	_, dedup, err = ws.Signal(ctx, driver.DAGSignalParams{DAGID: id, Name: "gate"})
+	is.NoError(err)
+	is.False(dedup, "no MessageID, no dedupe")
+
+	promoteUnblocked(ctx, t, ws)
+	n, err := ws.DeliverBufferedSignals(ctx)
+	is.NoError(err)
+	is.GreaterOrEqual(n, int64(1))
+	late := wfTaskByKey(ctx, t, ws, id, "late")
+	is.Equal(driver.StateSucceeded, late.State)
+	is.JSONEq(string(first), string(late.Result), "the delivered result is the FIRST payload, not the tampered repeat")
+}
+
+// runDAGSignalTerminal pins Signal's only error path: a missing or terminal
+// workflow is not-found, and the rejected signal leaves no effective inbox
+// row (a later pass delivers nothing).
+func runDAGSignalTerminal(t *testing.T, _ driver.Store, ws driver.DAGStore) {
+	t.Helper()
+	ctx := context.Background()
+	is := require.New(t)
+
+	_, _, err := ws.Signal(ctx, driver.DAGSignalParams{DAGID: uuid.New(), Name: "ghost"})
+	is.True(driver.IsNotFound(err), "a missing workflow is not-found")
+
+	id := createWF(ctx, t, ws, driver.DAGParams{
+		Name:  "wfc_sigterm",
+		Tasks: []driver.DAGTask{{Key: "g", Kind: driver.KindSignal, SignalName: "g"}},
+	})
+	is.NoError(ws.CancelDAG(ctx, id))
+	_, _, err = ws.Signal(ctx, driver.DAGSignalParams{DAGID: id, Name: "g"})
+	is.True(driver.IsNotFound(err), "a terminal workflow rejects signals as not-found")
+
+	n, err := ws.DeliverBufferedSignals(ctx)
+	is.NoError(err)
+	is.Zero(n, "the rejected signal left nothing to deliver")
+}
+
+// runDAGSignalSleepBuffered pins the deferred early-wake: a wake signal
+// buffered while its $sleep is still blocked shortens the timer at promotion
+// time — DeliverBufferedSignals sets run_at to now, and CompleteDueSleeps
+// finishes it in the same pass.
+func runDAGSignalSleepBuffered(t *testing.T, store driver.Store, ws driver.DAGStore) {
+	t.Helper()
+	ctx := context.Background()
+	is := require.New(t)
+
+	id := createWF(ctx, t, ws, driver.DAGParams{
+		Name: "wfc_sigslp",
+		Tasks: []driver.DAGTask{
+			wfTask("gate", "wfc_sigslp_gate"),
+			{Key: "nap", Kind: driver.KindSleep, SleepFor: time.Hour, SignalName: "nap"},
+		},
+		Deps: []driver.DAGDep{{TaskKey: "nap", DependsOnKey: "gate"}},
+	})
+
+	delivered, _, err := ws.Signal(ctx, driver.DAGSignalParams{DAGID: id, Name: "nap"})
+	is.NoError(err)
+	is.Zero(delivered, "the wake buffers while the sleep is blocked")
+
+	finishWFTask(ctx, t, store, ws, "wfc_sigslp_gate", nil)
+	promoteUnblocked(ctx, t, ws)
+	is.Equal(driver.StateScheduled, wfTaskByKey(ctx, t, ws, id, "nap").State)
+
+	n, err := ws.DeliverBufferedSignals(ctx)
+	is.NoError(err)
+	is.GreaterOrEqual(n, int64(1))
+	_, err = ws.CompleteDueSleeps(ctx)
+	is.NoError(err)
+	is.Equal(driver.StateSucceeded, wfTaskByKey(ctx, t, ws, id, "nap").State,
+		"the buffered wake shortened the hour-long timer to now")
+}
+
+// ---- Skip -------------------------------------------------------------------
+
+// runDAGSkip pins the deliberate-no-op contract: Skip settles the task as
+// StateSkipped (terminal, reason retained, no result, no attempt recorded),
+// a skipped dependency satisfies its dependents like a succeeded one, the
+// workflow completes succeeded, TaskResults reports the skip distinguishably,
+// and a skipped task never enters a compensation chain.
+func runDAGSkip(t *testing.T, store driver.Store, ws driver.DAGStore) {
+	t.Helper()
+	ctx := context.Background()
+	is := require.New(t)
+
+	skipTask := wfTask("submit", "wfc_skip_submit")
+	skipTask.CompensationKind = "wfc_skip_undo"
+	skipTask.CompensationPayload = json.RawMessage(`{}`)
+	id := createWF(ctx, t, ws, driver.DAGParams{
+		Name: "wfc_skip",
+		Tasks: []driver.DAGTask{
+			skipTask,
+			wfTask("downstream", "wfc_skip_down"),
+		},
+		Deps: []driver.DAGDep{{TaskKey: "downstream", DependsOnKey: "submit"}},
+	})
+
+	// Lease "submit" and settle it as skipped.
+	leased := dequeueN(ctx, t, store, driver.SourceDAG, "wfc_skip_submit", 1, time.Minute)
+	is.Len(leased, 1)
+	is.NoError(store.Skip(ctx, leased[0].ID, leased[0].LeaseToken, "already VERIFIED"))
+
+	skipped := wfTaskByKey(ctx, t, ws, id, "submit")
+	is.Equal(driver.StateSkipped, skipped.State)
+	is.Equal("already VERIFIED", skipped.LastError, "the reason is retained for ops")
+	is.Nil(skipped.Result, "a skipped task has no result")
+	is.False(skipped.CompletedAt.IsZero(), "skipped is a completion, not a failure")
+	attempts, err := store.JobAttempts(ctx, driver.SourceDAG, skipped.ID)
+	is.NoError(err)
+	is.Empty(attempts, "a skip records no attempt history")
+
+	// The skipped dependency satisfies its dependent.
+	promoteUnblocked(ctx, t, ws)
+	is.Equal(driver.StatePending, wfTaskByKey(ctx, t, ws, id, "downstream").State,
+		"a skipped dependency satisfies its dependents like a succeeded one")
+
+	// TaskResults reports the skip distinguishably.
+	results, err := ws.TaskResults(ctx, id, []string{"submit"})
+	is.NoError(err)
+	is.True(results["submit"].Skipped, "TaskResults must mark the skip, never a silent nil")
+	is.Nil(results["submit"].Result)
+
+	// The workflow settles succeeded with the skip in it.
+	finishWFTask(ctx, t, store, ws, "wfc_skip_down", nil)
+	completeDAGs(ctx, t, ws)
+	is.Equal(driver.DAGSucceeded, wfView(ctx, t, ws, id).State,
+		"a workflow of succeeded+skipped tasks settles succeeded")
+
+	// A skipped task never compensates: kill a fresh workflow the same shape
+	// after its submit was skipped, and no comp:submit chain appears.
+	skipTask2 := wfTask("submit", "wfc_skip2_submit")
+	skipTask2.CompensationKind = "wfc_skip2_undo"
+	skipTask2.CompensationPayload = json.RawMessage(`{}`)
+	doomed := wfTask("boom", "wfc_skip2_boom")
+	doomed.MaxAttempts = 1
+	id2 := createWF(ctx, t, ws, driver.DAGParams{
+		Name: "wfc_skip2", OnFailure: driver.OnFailureCancel,
+		Tasks: []driver.DAGTask{skipTask2, doomed},
+		Deps:  []driver.DAGDep{{TaskKey: "boom", DependsOnKey: "submit"}},
+	})
+	leased = dequeueN(ctx, t, store, driver.SourceDAG, "wfc_skip2_submit", 1, time.Minute)
+	is.Len(leased, 1)
+	is.NoError(store.Skip(ctx, leased[0].ID, leased[0].LeaseToken, "already done"))
+	promoteUnblocked(ctx, t, ws)
+	killWFTask(ctx, t, store, "wfc_skip2_boom")
+	applyPolicyFor(ctx, t, ws, id2)
+
+	tasks, err := ws.DAGTasks(ctx, id2)
+	is.NoError(err)
+	for _, j := range tasks {
+		is.False(strings.HasPrefix(j.TaskKey, driver.TaskKeyCompensationPrefix),
+			"a skipped task did no work, so nothing compensates: found %q", j.TaskKey)
+	}
+	is.Equal(driver.DAGFailed, wfView(ctx, t, ws, id2).State,
+		"nothing to compensate: the cancel policy settles the workflow failed")
+}
+
+// ---- Pause ------------------------------------------------------------------
+
+// runDAGPause pins the operator-pause contract: PauseDAG freezes a running
+// workflow (header paused with the reason, pending/scheduled tasks held out
+// of the dequeue set), a signal arriving during the pause buffers, RetryDAG
+// is the one resume verb (tasks back to the ready set, buffered signal
+// delivered, workflow completes), pause outside running is not-found, and
+// CancelDAG sweeps paused tasks too (the latent leak this feature closed).
+func runDAGPause(t *testing.T, store driver.Store, ws driver.DAGStore) {
+	t.Helper()
+	ctx := context.Background()
+	is := require.New(t)
+
+	id := createWF(ctx, t, ws, driver.DAGParams{
+		Name: "wfc_pause",
+		Tasks: []driver.DAGTask{
+			wfTask("work", "wfc_pause_work"),
+			{Key: "approval", Kind: driver.KindSignal, SignalName: "approval"},
+			wfTask("after", "wfc_pause_after"),
+		},
+		Deps: []driver.DAGDep{{TaskKey: "after", DependsOnKey: "approval"}},
+	})
+
+	is.NoError(ws.PauseDAG(ctx, id, "provider outage"))
+	w := wfView(ctx, t, ws, id)
+	is.Equal(driver.DAGPaused, w.State)
+	is.Equal("provider outage", w.FailureReason, "the pause reason is recorded")
+	is.Equal(driver.StatePaused, wfTaskByKey(ctx, t, ws, id, "work").State)
+	is.Equal(driver.StateWaiting, wfTaskByKey(ctx, t, ws, id, "approval").State,
+		"a waiting signal task keeps its state; the paused header stops promotion instead")
+
+	// Frozen: nothing dequeues, and a signal buffers instead of... well, it
+	// would deliver to the waiting task — but its DEPENDENTS never promote
+	// while paused, so the flow stays frozen either way.
+	leased, err := store.DequeueBatch(ctx, driver.SourceDAG, driver.DequeueParams{
+		Kind: "wfc_pause_work", Limit: 1, Lease: time.Minute,
+	})
+	is.NoError(err)
+	is.Empty(leased, "a paused task never dequeues")
+	delivered, _, err := ws.Signal(ctx, driver.DAGSignalParams{DAGID: id, Name: "approval"})
+	is.NoError(err, "a paused workflow still accepts signals — it is live, just frozen")
+	is.Equal(int64(1), delivered)
+	promoteUnblocked(ctx, t, ws)
+	is.Equal(driver.StateBlocked, wfTaskByKey(ctx, t, ws, id, "after").State,
+		"nothing promotes while the header is paused")
+
+	// Pause is not re-entrant and needs running: paused/terminal are not-found.
+	is.True(driver.IsNotFound(ws.PauseDAG(ctx, id, "again")), "pausing a paused workflow is not-found")
+
+	// Retry resumes: header running, tasks back in the ready set, and the
+	// signal already delivered lets the successor promote.
+	is.NoError(ws.RetryDAG(ctx, id))
+	is.Equal(driver.DAGRunning, wfView(ctx, t, ws, id).State)
+	is.Equal(driver.StatePending, wfTaskByKey(ctx, t, ws, id, "work").State)
+	promoteUnblocked(ctx, t, ws)
+	is.Equal(driver.StatePending, wfTaskByKey(ctx, t, ws, id, "after").State)
+	finishWFTask(ctx, t, store, ws, "wfc_pause_work", nil)
+	finishWFTask(ctx, t, store, ws, "wfc_pause_after", nil)
+	completeDAGs(ctx, t, ws)
+	is.Equal(driver.DAGSucceeded, wfView(ctx, t, ws, id).State)
+	is.True(driver.IsNotFound(ws.PauseDAG(ctx, id, "late")), "pausing a terminal workflow is not-found")
+
+	// Cancel sweeps paused tasks: no zombie rows blocking completion forever.
+	id2 := createWF(ctx, t, ws, driver.DAGParams{
+		Name:  "wfc_pause_cancel",
+		Tasks: []driver.DAGTask{wfTask("w", "wfc_pause_cx_w")},
+	})
+	is.NoError(ws.PauseDAG(ctx, id2, "freeze"))
+	is.NoError(ws.CancelDAG(ctx, id2))
+	is.Equal(driver.StateCancelled, wfTaskByKey(ctx, t, ws, id2, "w").State,
+		"CancelDAG cancels operator-paused tasks too")
+	is.Equal(driver.DAGCancelled, wfView(ctx, t, ws, id2).State)
+}
+
+// ---- FindDAGByKey ------------------------------------------------------------
+
+// runDAGFindByKey pins the business-key lookup: with historical terminal
+// runs holding the same (name, key), the lookup resolves the ONE live run;
+// with no live run — or a wrong key — it is not-found (the right answer for
+// a webhook arriving after the run settled).
+func runDAGFindByKey(t *testing.T, store driver.Store, ws driver.DAGStore) {
+	t.Helper()
+	ctx := context.Background()
+	is := require.New(t)
+
+	// First run with the key settles terminal, freeing it.
+	first := createWF(ctx, t, ws, driver.DAGParams{
+		Name: "wfc_bykey", IdempotencyKey: "acct-42",
+		Tasks: []driver.DAGTask{wfTask("w", "wfc_bykey_w")},
+	})
+	finishWFTask(ctx, t, store, ws, "wfc_bykey_w", nil)
+	completeDAGs(ctx, t, ws)
+	is.Equal(driver.DAGSucceeded, wfView(ctx, t, ws, first).State)
+
+	// Second (live) run reuses the freed key: the lookup must resolve IT.
+	second := createWF(ctx, t, ws, driver.DAGParams{
+		Name: "wfc_bykey", IdempotencyKey: "acct-42",
+		Tasks: []driver.DAGTask{{Key: "g", Kind: driver.KindSignal, SignalName: "g"}},
+	})
+	got, err := ws.FindDAGByKey(ctx, "wfc_bykey", "acct-42")
+	is.NoError(err)
+	is.Equal(second, got, "the lookup resolves the live run, not the terminal one")
+
+	// A paused run still holds the key (paused is live).
+	is.NoError(ws.PauseDAG(ctx, second, "freeze"))
+	got, err = ws.FindDAGByKey(ctx, "wfc_bykey", "acct-42")
+	is.NoError(err)
+	is.Equal(second, got)
+	is.NoError(ws.RetryDAG(ctx, second))
+
+	_, err = ws.FindDAGByKey(ctx, "wfc_bykey", "acct-ghost")
+	is.True(driver.IsNotFound(err), "an unknown key is not-found")
+	_, err = ws.FindDAGByKey(ctx, "wfc_bykey_other", "acct-42")
+	is.True(driver.IsNotFound(err), "the key is scoped by definition name")
 }

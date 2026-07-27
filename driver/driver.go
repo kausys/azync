@@ -89,6 +89,12 @@ type Store interface {
 	// records the final attempt. Fenced by lease token.
 	Dead(ctx context.Context, id, leaseToken uuid.UUID, lastError string) error
 
+	// Skip settles an active job as StateSkipped: terminal, no result, the
+	// reason retained as its last error for the ops surfaces, counted as
+	// processed in the stats. A skipped DAG task satisfies its dependents
+	// like a succeeded one and never compensates. Fenced by lease token.
+	Skip(ctx context.Context, id, leaseToken uuid.UUID, reason string) error
+
 	// Release returns a leased job to StatePending as a safety net, decrementing
 	// attempt by one (floored at zero) without recording an attempt. Fenced by
 	// lease token.
@@ -98,10 +104,17 @@ type Store interface {
 	// decrementing attempt by one (floored at zero) so the lease it hands back
 	// never consumes the retry budget, and without recording an attempt. It is
 	// the polling-wait primitive ("the resource is not ready, re-check in d"):
-	// a handler can snooze indefinitely without ever exhausting its retries.
-	// Fenced by lease token: it returns a not-found error (see IsNotFound)
-	// when the token no longer owns an active row.
-	Snooze(ctx context.Context, id, leaseToken uuid.UUID, delay time.Duration) error
+	// a handler without a deadline can snooze indefinitely without ever
+	// exhausting its retries.
+	//
+	// A job carrying a snooze budget (Job.SnoozeBudget) is bounded: the FIRST
+	// Snooze stamps its deadline (now()+budget on the backend clock — the
+	// budget measures time spent waiting, not the job's age), and a Snooze
+	// settled past that deadline dead-letters the job atomically instead,
+	// recording the final attempt with deadlineError as its last error, and
+	// returns deadlined=true. Fenced by lease token: it returns a not-found
+	// error (see IsNotFound) when the token no longer owns an active row.
+	Snooze(ctx context.Context, id, leaseToken uuid.UUID, delay time.Duration, deadlineError string) (deadlined bool, err error)
 
 	// ExtendLease renews an active job's lease for the duration. Fenced by lease
 	// token: it returns a not-found error once the token no longer owns the row.
@@ -181,6 +194,13 @@ type Store interface {
 	// RetryAllDead resets every dead job of (source, kind) to pending and returns
 	// the count. An empty kind targets all kinds of the source.
 	RetryAllDead(ctx context.Context, source Source, kind string) (int64, error)
+
+	// RunNow expedites one scheduled job: run_at moves to now, the state to
+	// pending, and workers are woken — the early-wake verb for a snoozed
+	// poll (a webhook arrived, the operator will not wait out the re-check
+	// delay). Only StateScheduled qualifies; any other state — already
+	// runnable, leased or settled — is a not-found error (see IsNotFound).
+	RunNow(ctx context.Context, source Source, id uuid.UUID) error
 
 	// ArchiveJob force-fails a pending or scheduled job of the source to dead. It
 	// returns a not-found error when the job is not in an archivable state.

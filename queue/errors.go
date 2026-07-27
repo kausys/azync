@@ -1,7 +1,6 @@
 package queue
 
 import (
-	"errors"
 	"time"
 
 	"github.com/kausys/azync/driver"
@@ -19,6 +18,12 @@ type jobError struct {
 
 func (e *jobError) Error() string { return e.err.Error() }
 func (e *jobError) Unwrap() error { return e.err }
+
+// AsyncOutcome implements engine.OutcomeError, making the sentinel portable
+// across runtimes.
+func (e *jobError) AsyncOutcome() engine.Outcome {
+	return engine.Outcome{Kind: e.kind, Delay: e.delay, Reportable: e.reportable}
+}
 
 // Abort sends the job straight to the dead letter — the error is permanent.
 func Abort(err error) error {
@@ -41,12 +46,11 @@ func Reportable(err error) error {
 	return &jobError{err: err, kind: engine.OutcomeRetry, reportable: true}
 }
 
-// classify maps a handler error to the engine outcome the executor settles by.
+// classify maps a handler error to the engine outcome the executor settles
+// by, through the shared cross-runtime classifier: any runtime's sentinel is
+// honored, not only this package's.
 func classify(err error) engine.Outcome {
-	if je, ok := errors.AsType[*jobError](err); ok {
-		return engine.Outcome{Kind: je.kind, Delay: je.delay, Reportable: je.reportable}
-	}
-	return engine.Outcome{Kind: engine.OutcomeRetry}
+	return engine.ClassifyOutcome(err)
 }
 
 // IsNotFound reports whether err is the queue's not-found/wrong-state error.

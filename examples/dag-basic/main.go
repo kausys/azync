@@ -187,9 +187,10 @@ func run() error {
 	}
 	slog.Info("onboarding started", "dag_id", started.ID.String(), "deduplicated", started.Deduplicated)
 
-	// Simulate the approval webhook: after a short delay a real handler would call
-	// Signal once. We retry on ErrNoSignalMatched so an early "webhook" that races
-	// ahead of the DAG reaching the wait still lands.
+	// Simulate the approval webhook: one Signal call, exactly like a real
+	// handler. Signals are durable — one racing ahead of the DAG reaching the
+	// wait is buffered and delivered by the scheduler — and WithMessageID
+	// dedupes at-least-once redeliveries.
 	wg.Go(func() {
 		deliverApproval(ctx, r.Client(), started.ID)
 	})
@@ -300,33 +301,24 @@ func registerHandlers(r *dag.Runtime, prov *provider) error {
 	return nil
 }
 
-// deliverApproval simulates the approval webhook. A real webhook handler would
-// call Signal once; retrying on ErrNoSignalMatched covers the case where the
-// signal arrives before the DAG has reached the WaitSignal task.
+// deliverApproval simulates the approval webhook: exactly one Signal call.
+// Signals are durable — if the DAG has not reached the WaitSignal task yet,
+// the delivery is buffered and lands once the wait becomes deliverable — and
+// WithMessageID makes an at-least-once redelivery a no-op, so a real handler
+// needs no retry loop and no dedupe of its own.
 func deliverApproval(ctx context.Context, client *dag.Client, id uuid.UUID) {
 	select {
 	case <-time.After(3 * time.Second):
 	case <-ctx.Done():
 		return
 	}
-	for {
-		err := client.Signal(ctx, id, "await-approval", approval{By: "compliance-officer"})
-		switch {
-		case err == nil:
-			slog.Info("approval webhook delivered", "dag_id", id.String())
-			return
-		case errors.Is(err, dag.ErrNoSignalMatched):
-			// The flow has not parked on the wait yet; try again shortly.
-			select {
-			case <-time.After(500 * time.Millisecond):
-			case <-ctx.Done():
-				return
-			}
-		default:
-			log.Printf("deliver approval: %v", err)
-			return
-		}
+	err := client.Signal(ctx, id, "await-approval", approval{By: "compliance-officer"},
+		dag.WithMessageID("webhook-evt-42"))
+	if err != nil {
+		log.Printf("deliver approval: %v", err)
+		return
 	}
+	slog.Info("approval webhook delivered", "dag_id", id.String())
 }
 
 // awaitSuccess polls the workflow until it succeeds, or fails loudly if it

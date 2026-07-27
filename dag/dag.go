@@ -11,7 +11,7 @@ import (
 	"github.com/kausys/azync/internal/engine"
 )
 
-// workflow-only defaults; the shared knobs default from the core
+// DAG-only defaults; the shared knobs default from the core
 // (azync.Defaults).
 const (
 	defaultTaskTimeout   = 5 * time.Minute
@@ -20,8 +20,8 @@ const (
 	defaultDAGVacuum     = time.Hour
 )
 
-// Runtime is the workflow system over one azync Core: the Client, the Worker
-// and the Manager, all operating the workflow job source only. It requires a
+// Runtime is the DAG system over one azync Core: the Client, the Worker
+// and the Manager, all operating the dag job source only. It requires a
 // driver with the [driver.DAGStore] capability; New and Open fail with a
 // clear error otherwise.
 type Runtime struct {
@@ -35,8 +35,8 @@ type Runtime struct {
 	manager *Manager
 }
 
-// New composes a workflow runtime over a shared Core. Settings start from the
-// Core's defaults and workflow options override them per runtime. It fails
+// New composes a DAG runtime over a shared Core. Settings start from the
+// Core's defaults and DAG options override them per runtime. It fails
 // when the Core's driver does not implement driver.DAGStore.
 func New(core *azync.Core, opts ...Option) (*Runtime, error) {
 	if core == nil {
@@ -45,7 +45,7 @@ func New(core *azync.Core, opts ...Option) (*Runtime, error) {
 	return newRuntime(core, opts, false)
 }
 
-// Open builds a standalone workflow runtime that owns a private Core opened
+// Open builds a standalone DAG runtime that owns a private Core opened
 // from dsn (pass Core options through WithCoreOptions). Close closes the owned
 // Core. Open never migrates; call Migrate before using a fresh schema.
 func Open(dsn string, opts ...Option) (*Runtime, error) {
@@ -109,17 +109,17 @@ func newRuntime(core *azync.Core, opts []Option, forOpen bool) (*Runtime, error)
 		store:  store,
 		logger: core.Logger(),
 	}
-	r.manager = &Manager{store: store}
+	r.manager = &Manager{store: store, jobs: core.Store()}
 	return r, nil
 }
 
-// Client returns the workflow creation and signalling client.
+// Client returns the DAG creation and signalling client.
 func (r *Runtime) Client() *Client { return r.client }
 
 // Worker returns the task execution and scheduling runtime.
 func (r *Runtime) Worker() *Worker { return r.worker }
 
-// Manager returns the workflow administration client.
+// Manager returns the DAG administration client.
 func (r *Runtime) Manager() *Manager { return r.manager }
 
 // Migrate brings the backend schema up to date (requires a driver.Migrator).
@@ -143,7 +143,7 @@ func (r *Runtime) Close(ctx context.Context) error {
 }
 
 // config is the runtime's resolved settings: the core's shared defaults as the
-// baseline, plus workflow-only knobs, all overridable per runtime by With*
+// baseline, plus DAG-only knobs, all overridable per runtime by With*
 // options (package option > core option > default).
 type config struct {
 	azync.Defaults
@@ -162,7 +162,7 @@ type config struct {
 	vacuumInterval    time.Duration
 }
 
-// Option configures a workflow Runtime. Options compose; later options win.
+// Option configures a DAG Runtime. Options compose; later options win.
 type Option func(*config) error
 
 // resolveConfig layers opts over the core defaults. forOpen permits
@@ -278,7 +278,7 @@ func WithCoreOptions(opts ...azync.Option) Option {
 	}
 }
 
-// withSchedulerIntervals shrinks the scheduler tick and the workflow vacuum
+// withSchedulerIntervals shrinks the scheduler tick and the DAG vacuum
 // cadence. Test seam only.
 func withSchedulerIntervals(tick, vacuum time.Duration) Option {
 	return func(c *config) error {

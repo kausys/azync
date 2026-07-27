@@ -42,6 +42,12 @@ const (
 	// DAGCompensating marks a workflow whose compensation chain is
 	// executing.
 	DAGCompensating DAGState = "compensating"
+	// DAGPaused marks a workflow an operator froze (PauseDAG): non-terminal,
+	// its live tasks held out of the ready set, nothing promotes or runs
+	// until Manager.Retry resumes it. Distinct from DAGSuspended, which
+	// records a failure — a paused workflow is healthy, just deliberately
+	// stopped (say, while its provider is down).
+	DAGPaused DAGState = "paused"
 	// DAGSucceeded is the terminal state of a workflow whose tasks all
 	// succeeded.
 	DAGSucceeded DAGState = "succeeded"
@@ -127,12 +133,43 @@ type DAGTask struct {
 	// always triggers the policy — and a workflow that runs to completion with
 	// any dead task still settles failed, not succeeded (see CompleteDAGs).
 	IgnoreDeadDeps bool
+	// Deadline, when positive, bounds the task's snooze/NotReady loop: the
+	// driver persists it as the job's snooze budget, and the FIRST Snooze
+	// stamps deadline_at = now()+Deadline on the backend clock — the budget
+	// measures time spent waiting for the resource, not the workflow's age.
+	// A Snooze settled past the deadline dead-letters the task, triggering
+	// the workflow's OnFailure policy on the next scheduler pass. Zero means
+	// the task can snooze forever. Compensation tasks never inherit it, and
+	// RetryDAG clears the stamped deadline so a retried task waits with a
+	// fresh budget.
+	Deadline time.Duration
 }
 
 // DAGDep is one DAG edge: TaskKey waits for DependsOnKey.
 type DAGDep struct {
 	TaskKey      string
 	DependsOnKey string
+}
+
+// TaskResult is one settled task outcome as returned by TaskResults: either
+// a succeeded task's persisted output (Result, possibly nil for a task that
+// returned nothing) or a deliberate skip (Skipped=true, no result).
+type TaskResult struct {
+	Result  json.RawMessage
+	Skipped bool
+}
+
+// DAGSignalParams delivers (or buffers) one named signal on a workflow.
+type DAGSignalParams struct {
+	DAGID uuid.UUID
+	// Name is the signal name (the target task's key through the dag
+	// runtime).
+	Name string
+	// MessageID, when non-empty, deduplicates within (DAGID, Name): a repeat
+	// delivery of the same id is accepted and dropped. Empty disables dedupe.
+	// Use the sender's event id for at-least-once webhooks.
+	MessageID string
+	Payload   json.RawMessage
 }
 
 // DAGView is the backend-neutral projection of a workflow header for the
@@ -201,12 +238,49 @@ type DAGStore interface {
 	// meaningful only when inserted is false.
 	CreateDAG(ctx context.Context, p DAGParams) (inserted bool, existingID uuid.UUID, err error)
 
-	// Signal delivers a named signal to one workflow: every waiting KindSignal
-	// task with SignalName name completes as succeeded with the payload
-	// persisted as its result, and every scheduled KindSleep task with
-	// SignalName name is woken early (run_at = now()). It returns the number
-	// of tasks affected; zero with a nil error means nothing was waiting.
-	Signal(ctx context.Context, dagID uuid.UUID, name string, payload json.RawMessage) (matched int64, err error)
+	// Signal delivers (or buffers) one named signal on a live workflow,
+	// atomically: the delivery is appended to the workflow's signal inbox —
+	// deduplicated by MessageID when set: a repeat of the same id is accepted
+	// and dropped with deduplicated=true and no other effect — then
+	// immediately consumed when a matching task is deliverable (a waiting
+	// KindSignal task completes as succeeded with the payload persisted as
+	// its result; a scheduled KindSleep task is woken early, run_at = now()).
+	// delivered is the number of tasks completed or woken now; delivered == 0
+	// with deduplicated == false means the signal was accepted and buffered —
+	// DeliverBufferedSignals hands it to its task once that task becomes
+	// deliverable, so a signal racing the scheduler's promotion is never
+	// lost. It returns a not-found error (see IsNotFound) for a missing or
+	// terminal workflow.
+	Signal(ctx context.Context, p DAGSignalParams) (delivered int64, deduplicated bool, err error)
+
+	// DeliverBufferedSignals consumes buffered inbox signals whose target
+	// task has become deliverable (a waiting KindSignal task, or a scheduled
+	// KindSleep task, of a running or compensating workflow), oldest signal
+	// first per task, and returns the number delivered. Set-based and
+	// idempotent; the scheduler calls it right after PromoteUnblocked so a
+	// signal buffered while its task was still blocked lands within one tick.
+	DeliverBufferedSignals(ctx context.Context) (int64, error)
+
+	// FindDAGByKey resolves the live workflow (running, suspended,
+	// compensating or paused) holding (name, idempotencyKey) — the business
+	// key a webhook handler knows, without bookkeeping the run UUID
+	// anywhere. At most one live workflow holds a key (the dedupe barrier);
+	// terminal workflows free it, so a missing result is a not-found error
+	// (see IsNotFound) — the right answer for a webhook arriving after the
+	// run settled.
+	FindDAGByKey(ctx context.Context, name, idempotencyKey string) (uuid.UUID, error)
+
+	// PauseDAG freezes a RUNNING workflow: the header moves to DAGPaused with
+	// reason recorded, and its pending/scheduled tasks move to StatePaused,
+	// atomically. Blocked and waiting tasks keep their states — with the
+	// header out of running/compensating nothing promotes them, and incoming
+	// signals buffer in the inbox for delivery after resume. An active
+	// (leased) task keeps its lease and settles on its own; its successors
+	// simply never start. Time spent paused never burns a task's snooze
+	// budget: RetryDAG — the one resume verb — clears the stamped deadline
+	// when it releases the paused tasks. It returns a not-found error for a
+	// missing workflow or one in any state but running.
+	PauseDAG(ctx context.Context, id uuid.UUID, reason string) error
 
 	// PromoteUnblocked moves every blocked task whose dependencies are all
 	// satisfied to its runnable state, chosen by kind: KindSignal to waiting,
@@ -269,11 +343,14 @@ type DAGStore interface {
 	// the number of dags transitioned.
 	CompleteDAGs(ctx context.Context) (int64, error)
 
-	// TaskResults returns the persisted results of the workflow's succeeded
-	// tasks, keyed by task key, restricted to keys when non-empty (an empty
-	// keys slice returns every succeeded task). A succeeded task without a
-	// result maps to a nil value; tasks not yet succeeded are absent.
-	TaskResults(ctx context.Context, dagID uuid.UUID, keys []string) (map[string]json.RawMessage, error)
+	// TaskResults returns the settled outcomes of the workflow's succeeded
+	// and skipped tasks, keyed by task key, restricted to keys when non-empty
+	// (an empty keys slice returns every settled task). A succeeded task
+	// without a result maps to an entry with a nil Result; a skipped task
+	// maps to an entry with Skipped=true and no result — distinguishable, so
+	// a consumer never mistakes "deliberately did nothing" for "succeeded
+	// without output". Tasks not yet settled are absent.
+	TaskResults(ctx context.Context, dagID uuid.UUID, keys []string) (map[string]TaskResult, error)
 
 	// AckTaskResult completes an active task exactly like Store.Ack and
 	// additionally persists result as the task's durable output, atomically.

@@ -1,8 +1,6 @@
 package event
 
 import (
-	"errors"
-
 	"github.com/kausys/azync/driver"
 	"github.com/kausys/azync/internal/engine"
 )
@@ -18,6 +16,12 @@ type permanentError struct{ err error }
 func (e *permanentError) Error() string { return e.err.Error() }
 func (e *permanentError) Unwrap() error { return e.err }
 
+// AsyncOutcome implements engine.OutcomeError, making the sentinel portable
+// across runtimes.
+func (e *permanentError) AsyncOutcome() engine.Outcome {
+	return engine.Outcome{Kind: engine.OutcomeAbort}
+}
+
 // Permanent marks a handler error as non-retryable: the delivery goes straight
 // to the dead letter instead of consuming its remaining retry budget.
 func Permanent(err error) error {
@@ -27,19 +31,12 @@ func Permanent(err error) error {
 	return &permanentError{err: err}
 }
 
-// isPermanent reports whether err is (or wraps) a Permanent error.
-func isPermanent(err error) bool {
-	var target *permanentError
-	return errors.As(err, &target)
-}
-
-// classify maps a handler error to the engine outcome the executor settles by:
-// Permanent aborts to dead, anything else retries with the engine backoff.
+// classify maps a handler error to the engine outcome the executor settles
+// by, through the shared cross-runtime classifier: any runtime's sentinel is
+// honored (Permanent aborts; a dag.NotReady from shared handler code snoozes
+// instead of burning the delivery's budget).
 func classify(err error) engine.Outcome {
-	if isPermanent(err) {
-		return engine.Outcome{Kind: engine.OutcomeAbort}
-	}
-	return engine.Outcome{Kind: engine.OutcomeRetry}
+	return engine.ClassifyOutcome(err)
 }
 
 // IsNotFound reports whether err is the driver's not-found / wrong-state error,

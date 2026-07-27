@@ -24,7 +24,12 @@ type TaskInfo struct {
 	Attempt     int // 1-based: first execution is attempt 1
 	MaxAttempts int
 	EnqueuedAt  time.Time
-	Meta        map[string]string
+	// DeadlineAt is the task's stamped snooze deadline (see the Deadline task
+	// option); zero until the first NotReady of a task that declared one. A
+	// polling handler can read it to adapt its re-check cadence as the budget
+	// runs out.
+	DeadlineAt time.Time
+	Meta       map[string]string
 }
 
 // taskKey is the private context key carrying the TaskInfo of the task in
@@ -68,6 +73,7 @@ func taskInfoFrom(job driver.Job) TaskInfo {
 		Attempt:     job.Attempt,
 		MaxAttempts: job.MaxAttempts,
 		EnqueuedAt:  job.EnqueuedAt,
+		DeadlineAt:  job.DeadlineAt,
 		Meta:        job.Meta,
 	}
 }
@@ -100,27 +106,26 @@ func IsRetry(ctx context.Context) bool { return taskFromContext(ctx).Attempt > 1
 // WithMeta plus run WithRunMeta). Nil outside a task.
 func Metadata(ctx context.Context) map[string]string { return taskFromContext(ctx).Meta }
 
-// resultResolver fetches the persisted results of the current workflow's
-// succeeded tasks, once per handler invocation: the first ResultOf call loads
-// every available result in one store round-trip and later calls read the
-// cache.
+// resultResolver fetches the settled outcomes of the current workflow's
+// tasks, once per handler invocation: the first ResultOf call loads every
+// available outcome in one store round-trip and later calls read the cache.
 type resultResolver struct {
-	fetch func(ctx context.Context) (map[string]json.RawMessage, error)
+	fetch func(ctx context.Context) (map[string]driver.TaskResult, error)
 
 	once    sync.Once
-	results map[string]json.RawMessage
+	results map[string]driver.TaskResult
 	err     error
 }
 
-// resolve returns the raw result for key, whether the key had one, and any
-// fetch error.
-func (r *resultResolver) resolve(ctx context.Context, key string) (json.RawMessage, bool, error) {
+// resolve returns the settled outcome for key, whether the key had one, and
+// any fetch error.
+func (r *resultResolver) resolve(ctx context.Context, key string) (driver.TaskResult, bool, error) {
 	r.once.Do(func() { r.results, r.err = r.fetch(ctx) })
 	if r.err != nil {
-		return nil, false, r.err
+		return driver.TaskResult{}, false, r.err
 	}
-	raw, ok := r.results[key]
-	return raw, ok, nil
+	tr, ok := r.results[key]
+	return tr, ok, nil
 }
 
 // withResolver returns a copy of parent carrying the resolver ResultOf reads.
@@ -132,7 +137,7 @@ func withResolver(parent context.Context, r *resultResolver) context.Context {
 // persisted task results of one workflow.
 func newResultResolver(store driver.DAGStore, dagID uuid.UUID) *resultResolver {
 	return &resultResolver{
-		fetch: func(ctx context.Context) (map[string]json.RawMessage, error) {
+		fetch: func(ctx context.Context) (map[string]driver.TaskResult, error) {
 			return store.TaskResults(ctx, dagID, nil)
 		},
 	}
@@ -140,14 +145,16 @@ func newResultResolver(store driver.DAGStore, dagID uuid.UUID) *resultResolver {
 
 // ResultOf returns the persisted result of the workflow task key, decoded into
 // T — the way a task reads the output of a dependency it declared with After
-// (a dependency is guaranteed succeeded before its dependents run). For a
+// (a dependency is guaranteed settled before its dependents run). For a
 // WaitSignal task the result is the signal payload.
 //
-// The three failure modes are distinguishable: a context without a resolver
-// (built by NewContext instead of a worker), a key with no persisted result
-// (absent from the workflow or not succeeded), and a result that does not
-// decode into T. A task that succeeded without producing a result (a Sleep, or
-// a handler returning None) yields T's zero value with a nil error.
+// The failure modes are distinguishable: a context without a resolver (built
+// by NewContext instead of a worker), a key with no settled outcome (absent
+// from the workflow or not settled yet), a dependency that was deliberately
+// skipped — ErrTaskSkipped, testable with errors.Is, never a silent zero
+// value — and a result that does not decode into T. A task that succeeded
+// without producing a result (a Sleep, or a handler returning None) yields
+// T's zero value with a nil error.
 func ResultOf[T any](ctx context.Context, key string) (T, error) {
 	var out T
 	r, ok := ctx.Value(resolverKey{}).(*resultResolver)
@@ -155,18 +162,21 @@ func ResultOf[T any](ctx context.Context, key string) (T, error) {
 		return out, fmt.Errorf("dag: ResultOf(%q): no result resolver in context "+
 			"(the context did not come from a workflow worker)", key)
 	}
-	raw, found, err := r.resolve(ctx, key)
+	tr, found, err := r.resolve(ctx, key)
 	if err != nil {
 		return out, fmt.Errorf("dag: ResultOf(%q): fetch task results: %w", key, err)
 	}
 	if !found {
 		return out, fmt.Errorf("dag: ResultOf(%q): no persisted result "+
-			"(the task is not part of this workflow or has not succeeded)", key)
+			"(the task is not part of this workflow or has not settled)", key)
 	}
-	if raw == nil {
+	if tr.Skipped {
+		return out, fmt.Errorf("dag: ResultOf(%q): %w", key, ErrTaskSkipped)
+	}
+	if tr.Result == nil {
 		return out, nil // succeeded without a result (Sleep, or a None handler)
 	}
-	if err := json.Unmarshal(raw, &out); err != nil {
+	if err := json.Unmarshal(tr.Result, &out); err != nil {
 		return out, fmt.Errorf("dag: ResultOf(%q): unmarshal result: %w", key, err)
 	}
 	return out, nil

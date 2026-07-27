@@ -69,7 +69,17 @@ func (UnimplementedStore) Release(context.Context, uuid.UUID, uuid.UUID) error {
 }
 
 // Snooze reports ErrNotSupported.
-func (UnimplementedStore) Snooze(context.Context, uuid.UUID, uuid.UUID, time.Duration) error {
+func (UnimplementedStore) Snooze(context.Context, uuid.UUID, uuid.UUID, time.Duration, string) (bool, error) {
+	return false, ErrNotSupported
+}
+
+// Skip reports ErrNotSupported.
+func (UnimplementedStore) Skip(context.Context, uuid.UUID, uuid.UUID, string) error {
+	return ErrNotSupported
+}
+
+// RunNow reports ErrNotSupported.
+func (UnimplementedStore) RunNow(context.Context, Source, uuid.UUID) error {
 	return ErrNotSupported
 }
 

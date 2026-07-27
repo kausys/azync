@@ -3,6 +3,7 @@ package azyncpgx
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"strconv"
 	"time"
@@ -240,7 +241,7 @@ func orderForState(state driver.JobState) string {
 		return "run_at, id"
 	case driver.StateActive:
 		return "lease_until, id"
-	case driver.StateSucceeded:
+	case driver.StateSucceeded, driver.StateSkipped:
 		return "completed_at DESC, id"
 	case driver.StatePending, driver.StateDead:
 		return "enqueued_at, id"
@@ -323,7 +324,7 @@ func (s *Store) JobAttempts(ctx context.Context, source driver.Source, id uuid.U
 const retryJobSQL = `
 UPDATE azync_jobs SET
 	state = 'pending', run_at = now(), attempt = 0, reap_count = 0,
-	last_error = NULL, failed_at = NULL, updated_at = now()
+	last_error = NULL, failed_at = NULL, deadline_at = NULL, updated_at = now()
 WHERE id = $1 AND source = $2 AND state = 'dead'`
 
 // RetryJob resets a dead job of the source to pending for immediate retry.
@@ -342,11 +343,30 @@ func (s *Store) RetryAllDead(ctx context.Context, source driver.Source, kind str
 	sql := `
 UPDATE azync_jobs SET
 	state = 'pending', run_at = now(), attempt = 0, reap_count = 0,
-	last_error = NULL, failed_at = NULL, updated_at = now()
+	last_error = NULL, failed_at = NULL, deadline_at = NULL, updated_at = now()
 WHERE id IN (
 	SELECT id FROM azync_jobs WHERE source = $1` + clause + ` AND state = 'dead' LIMIT $` + strconv.Itoa(len(args)) + `
 )`
 	return s.execBatchLoop(ctx, "retry all dead", sql, args...)
+}
+
+const runNowSQL = `
+UPDATE azync_jobs SET state = 'pending', run_at = now(), updated_at = now()
+WHERE id = $1 AND source = $2 AND state = 'scheduled'`
+
+// RunNow expedites a scheduled job to pending with run_at = now, then wakes
+// workers post-commit — the early-wake verb for a snoozed poll.
+func (s *Store) RunNow(ctx context.Context, source driver.Source, id uuid.UUID) error {
+	var kind string
+	err := s.pool.QueryRow(ctx, runNowSQL+` RETURNING kind`, id, string(source)).Scan(&kind)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return driver.NewNotFound("run now")
+	}
+	if err != nil {
+		return fmt.Errorf("azyncpgx: run now: %w", err)
+	}
+	s.notifyAfterCommit(source, kind) //nolint:contextcheck // deliberately independent of ctx, see notifyAfterCommit doc
+	return nil
 }
 
 const archiveJobSQL = `
