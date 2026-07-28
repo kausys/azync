@@ -93,6 +93,32 @@ wf, _ := workflow.New(core) // needs driver.WorkflowStore
 - Admin UI over the `Manager` surfaces
 - `database/sql` driver and more backends
 
+## Releasing
+
+Conventional commits on `main`; release-please opens the release PR and merging
+it cuts the tag, mirrored onto `driver/azyncpgx/vX.Y.Z`. Never edit
+`.release-please-manifest.json` or `CHANGELOG.md` by hand — that PR owns them.
+
+**While the line is `0.0.x`, a commit carrying a `BREAKING CHANGE:` footer must
+also carry a `Release-As:` footer naming the intended version:**
+
+```
+BREAKING CHANGE: driver.Store gains Foo (custom drivers must add it).
+
+Release-As: 0.0.8
+```
+
+`bump-minor-pre-major` is not set in `release-please-config.json` and its
+default is `false`, so release-please reads any breaking change on a `0.x` line
+as `1.0.0`. `Release-As:` is what pins it. The API is still moving and nearly
+every release so far has been breaking, so the footer is the norm here, not an
+exception — and omitting it does not fail anything, it silently proposes a
+major.
+
+If a release PR appears with the wrong version, land another commit on `main`
+carrying the right `Release-As:`; release-please rebuilds the PR from it. The
+tag is only cut when that PR merges, so nothing is published in the meantime.
+
 ## License
 
 [MIT](LICENSE)
