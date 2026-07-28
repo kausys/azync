@@ -15,7 +15,7 @@ Static durable DAG runtime: graph is data; task handlers are at-least-once funct
 | `dag.go`, `open.go` | `New` / `Open` |
 | `define.go`, `client.go` | Graph definition, `Run` / `Signal` |
 | `worker.go`, `register.go` | Task handlers, scheduling |
-| `manager.go` | Admin (Get/Tasks/Retry/Compensate/Cancel) |
+| `manager.go` | Admin (Get/Tasks/Stats/Definitions/TaskCounts/TaskAttempts/Retry/Compensate/Cancel) |
 | `result.go`, `context.go`, `options.go` | `ResultOf`, ctx accessors, retention |
 
 ## Driver surface
@@ -28,7 +28,10 @@ Requires `driver.DAGStore` (+ Core job store). Tables: `azync_dags`, `azync_dag_
 - `Client.Run`, `Client.Signal`
 - `Register`, `ResultOf[T]`, `NotReady`
 - `WithRetention`, `WithIdempotencyKey`
-- `Manager`
+- `Manager` — inspection (`Tasks` returns each task's `DependsOn`, so the slice
+  is the graph), `Stats` / `Definitions` / `TaskCounts` for listings and the
+  definition navigator, `TaskAttempts` for the failure trail, plus the operator
+  verbs
 
 ## Boundaries
 

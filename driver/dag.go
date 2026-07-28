@@ -374,6 +374,38 @@ type DAGStore interface {
 	// not exist.
 	DAGTasks(ctx context.Context, id uuid.UUID) ([]Job, error)
 
+	// DAGDeps returns every dependency edge of the workflow — the static edges
+	// declared at Run plus the compensation-chain links inserted when
+	// compensation starts — ordered by (task_key, depends_on_key). It is the
+	// read half of what CreateDAG persists: the scheduler only ever asks these
+	// rows "is this task unblocked?", so without it the graph is unreadable
+	// from outside and an admin surface has to guess the shape of a run from
+	// timestamps, which silently turns a parallel fan-out into a chain.
+	//
+	// An unknown id returns no rows rather than an error: callers pair this
+	// with DAGTasks, which already reports absence.
+	DAGDeps(ctx context.Context, id uuid.UUID) ([]DAGDep, error)
+
+	// DAGNameStateCounts returns how many dags sit in each state, per
+	// definition name, counting every dag the backend still retains. Names and
+	// states with no dags may be absent rather than present with a zero.
+	//
+	// It is keyed by name rather than global because the set of names is
+	// itself an answer nothing else provides: ListDAGs filters BY name but
+	// never enumerates them, so an admin surface offering a definition
+	// navigator (as the queue one does over ListKinds) would otherwise have to
+	// learn names from whichever page happened to be on screen. Summing the
+	// inner maps gives the global per-state counts, so this is one read, not
+	// two.
+	DAGNameStateCounts(ctx context.Context) (map[string]map[DAGState]int64, error)
+
+	// DAGTaskCounts returns, per requested dag, how many of its tasks sit in
+	// each task state — the one read that lets a listing show each run's task
+	// breakdown without a DAGTasks call per row. Ids with no tasks (unknown
+	// ones included) may be absent from the map rather than present with an
+	// empty one; an empty ids slice returns an empty map without querying.
+	DAGTaskCounts(ctx context.Context, ids []uuid.UUID) (map[uuid.UUID]map[JobState]int64, error)
+
 	// RetryDAG resumes a non-terminal workflow after failures: dead tasks
 	// are reset to pending with a fresh budget (attempt and reap_count
 	// cleared) and a suspended workflow resumes — to running, or back to

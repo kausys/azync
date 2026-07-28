@@ -185,7 +185,9 @@ func (s *Store) enqueue(ctx context.Context, q querier, p driver.EnqueueParams, 
 // dequeueClaimBody is the shared SET/pick clause of the two dequeue statements.
 // The first lease resolves the retry budget durably (max_attempts_explicit=true)
 // so later workers with divergent defaults cannot overwrite it. SKIP LOCKED lets
-// many workers claim disjoint batches without blocking.
+// many workers claim disjoint batches without blocking. started_at moves with
+// attempt: each lease begins a new attempt, so the column always describes the
+// attempt currently reflected by state and completed_at.
 const dequeueClaimBody = `
 UPDATE azync_jobs j SET
 	state = 'active',
@@ -194,6 +196,7 @@ UPDATE azync_jobs j SET
 	max_attempts = CASE WHEN j.max_attempts_explicit OR NOT $2 THEN j.max_attempts ELSE $3 END,
 	max_attempts_explicit = true,
 	attempt = j.attempt + 1,
+	started_at = now(),
 	updated_at = now()
 FROM (
 	SELECT id FROM azync_jobs
@@ -496,7 +499,7 @@ func jobColumns(alias string) string {
 		a + `event_id, ` + a + `replay, ` + a + `enqueued_at, ` + a + `failed_at, ` + a + `completed_at, ` +
 		a + `dag_id, ` + a + `run_id, COALESCE(` + a + `task_key, ''), ` + a + `result::text, ` +
 		`COALESCE(` + a + `signal_name, ''), COALESCE(` + a + `compensation_kind, ''), ` + a + `ignore_dead_deps, ` +
-		`COALESCE(` + a + `snooze_budget, 0), ` + a + `deadline_at`
+		`COALESCE(` + a + `snooze_budget, 0), ` + a + `deadline_at, ` + a + `started_at`
 }
 
 // eventColumns is the projected ledger column list under the given alias, used
@@ -538,6 +541,7 @@ type scannedJob struct {
 	ignoreDeadDeps   bool
 	snoozeBudget     float64
 	deadlineAt       pgtype.Timestamptz
+	startedAt        pgtype.Timestamptz
 }
 
 // scannedEvent is the raw scan target for eventColumns.
@@ -557,7 +561,7 @@ func (sj *scannedJob) scanArgs() []any {
 		&sj.payload, &sj.meta, &sj.runAt, &sj.leaseUntil,
 		&sj.leaseToken, &sj.lastError, &sj.eventID, &sj.replay, &sj.enqueuedAt, &sj.failedAt, &sj.completedAt,
 		&sj.dagID, &sj.runID, &sj.taskKey, &sj.result, &sj.signalName, &sj.compensationKind, &sj.ignoreDeadDeps,
-		&sj.snoozeBudget, &sj.deadlineAt,
+		&sj.snoozeBudget, &sj.deadlineAt, &sj.startedAt,
 	}
 }
 
@@ -617,6 +621,7 @@ func (sj *scannedJob) toJob() (driver.Job, error) {
 		IgnoreDeadDeps:   sj.ignoreDeadDeps,
 		SnoozeBudget:     secondsToDuration(sj.snoozeBudget),
 		DeadlineAt:       sj.deadlineAt.Time,
+		StartedAt:        sj.startedAt.Time,
 	}, nil
 }
 

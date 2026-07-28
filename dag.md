@@ -122,6 +122,10 @@ res, err := txc.RunTx(ctx, tx, def, dag.WithIdempotencyKey(key))
 |--------|------|
 | `Get` / `Tasks` / `List` | Inspect (results never travel in listings) |
 | `TaskResult` | Read ONE settled task's payload — deliberate call, gate it behind your own authz (results routinely carry PII) |
+| `TaskAttempts` | One task's whole failure trail by key — `LastError` is only the newest, which cannot tell "flaky, passed on retry 3" from "the same error four times" |
+| `Stats` | DAG counts per state, for a state-tab bar — one read instead of a `List` per state |
+| `Definitions` | Every definition that has runs, each with its own state counts — the definition navigator. `Filter` selects BY name but nothing else enumerates them, so without this a caller only ever sees the names on the page in front of it. Same underlying read as `Stats` |
+| `TaskCounts` | Task breakdown per DAG for a page of ids, so a listing shows each run's progress without a query per row |
 | `Retry` | The one resume verb: reset dead tasks, release paused ones (fresh snooze budgets), resume a suspended or paused DAG |
 | `Pause` | Operator freeze of a running DAG (provider outage): nothing runs, promotes or burns budget until Retry |
 | `RunNow` | Expedite one scheduled task by key (a NotReady re-check, a backoff, a Sleep) to run immediately |
@@ -129,6 +133,16 @@ res, err := txc.RunTx(ctx, tx, def, dag.WithIdempotencyKey(key))
 | `Cancel` | Cancel a live DAG (sweeps paused tasks too) |
 
 States: `running`, `suspended`, `compensating`, `paused`, `succeeded`, `failed`, `cancelled`.
+
+Each `TaskView` from `Tasks` carries its `DependsOn` keys, so the slice is the
+graph and not just a list — lay a run out by dependency depth, never by
+timestamp order, which renders a parallel fan-out as a chain and never looks
+wrong. Compensation tasks (`comp:<key>`) carry their chain links the same way.
+
+For timing, `StartedAt` is when the **current attempt** was leased:
+`CompletedAt - StartedAt` is execution time, `CompletedAt - EnqueuedAt` folds in
+the wait, and `RunAt` is neither — it is the due time, rewritten by every
+promotion, backoff and snooze.
 
 ## vs workflow-as-code
 

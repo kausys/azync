@@ -4,6 +4,8 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"slices"
+	"strings"
 	"time"
 
 	"github.com/kausys/azync/driver"
@@ -95,8 +97,23 @@ type TaskView struct {
 	State       TaskState
 	Attempt     int
 	MaxAttempts int
+	// DependsOn are the keys this task waits for — the edges declared at Run,
+	// plus the compensation-chain links for a "comp:" task. Nil for a root
+	// task; nil and empty mean the same thing. Together across every task of
+	// the DAG these are the graph, so an admin surface can lay a run out by
+	// dependency depth instead of inferring an order from timestamps.
+	DependsOn []string
+	// EnqueuedAt is when the task row was created.
+	EnqueuedAt time.Time
 	// RunAt is when the task becomes (or became) due.
 	RunAt time.Time
+	// StartedAt is when the current attempt was leased, so
+	// CompletedAt.Sub(StartedAt) is how long the task actually ran. RunAt
+	// cannot answer that — promotion, retry backoff and snooze each rewrite it
+	// — and CompletedAt.Sub(EnqueuedAt) folds in the wait, which for a task
+	// parked on a poll or a signal dwarfs the execution. Zero before the first
+	// lease.
+	StartedAt time.Time
 	// CompletedAt is zero until the task completed (succeeded or cancelled).
 	CompletedAt time.Time
 	// LastError is the most recent failure message.
@@ -131,6 +148,11 @@ func (m *Manager) Get(ctx context.Context, id uuid.UUID) (*View, error) {
 // relative order of tasks inserted together at Run is stable, not the
 // declaration order — or nil when the DAG does not exist (a DAG
 // always has at least one task, so nil unambiguously means absence).
+//
+// Each view carries its DependsOn keys, so the returned slice is the whole
+// graph and not just a list: a caller can lay the run out by dependency depth
+// rather than infer an order from timestamps, which would render a parallel
+// fan-out as a chain and never look wrong.
 func (m *Manager) Tasks(ctx context.Context, id uuid.UUID) ([]TaskView, error) {
 	jobs, err := m.store.DAGTasks(ctx, id)
 	if err != nil {
@@ -138,6 +160,14 @@ func (m *Manager) Tasks(ctx context.Context, id uuid.UUID) ([]TaskView, error) {
 			return nil, nil
 		}
 		return nil, err
+	}
+	deps, err := m.store.DAGDeps(ctx, id)
+	if err != nil {
+		return nil, err
+	}
+	byKey := make(map[string][]string, len(deps))
+	for _, d := range deps {
+		byKey[d.TaskKey] = append(byKey[d.TaskKey], d.DependsOnKey)
 	}
 	views := make([]TaskView, 0, len(jobs))
 	for _, j := range jobs {
@@ -148,7 +178,10 @@ func (m *Manager) Tasks(ctx context.Context, id uuid.UUID) ([]TaskView, error) {
 			State:       j.State,
 			Attempt:     j.Attempt,
 			MaxAttempts: j.MaxAttempts,
+			DependsOn:   byKey[j.TaskKey],
+			EnqueuedAt:  j.EnqueuedAt,
 			RunAt:       j.RunAt,
+			StartedAt:   j.StartedAt,
 			CompletedAt: j.CompletedAt,
 			LastError:   j.LastError,
 			HasResult:   j.Result != nil,
@@ -227,6 +260,127 @@ func (m *Manager) RunNow(ctx context.Context, id uuid.UUID, taskKey string) erro
 		}
 	}
 	return driver.NewNotFound("run now")
+}
+
+// AttemptError is one recorded failure in a task's retry history.
+type AttemptError = driver.AttemptError
+
+// TaskAttempts returns one task's failure history, oldest attempt first,
+// addressed by its key within the DAG (how an operator thinks, no job UUID
+// needed). LastError on a TaskView is only the most recent failure; this is
+// the whole trail, which is what distinguishes "flaky, succeeded on retry 3"
+// from "the same error four times".
+//
+// A task that never failed returns no entries. It returns a not-found error
+// (see IsNotFound) for a missing DAG or key.
+func (m *Manager) TaskAttempts(ctx context.Context, id uuid.UUID, taskKey string) ([]AttemptError, error) {
+	jobs, err := m.store.DAGTasks(ctx, id)
+	if err != nil {
+		return nil, err
+	}
+	for _, j := range jobs {
+		if j.TaskKey == taskKey {
+			return m.jobs.JobAttempts(ctx, driver.SourceDAG, j.ID)
+		}
+	}
+	return nil, driver.NewNotFound("task attempts")
+}
+
+// Stats counts DAG executions by state — the one read behind a state-tab bar,
+// which would otherwise be a List call per state.
+type Stats struct {
+	Running      int64
+	Suspended    int64
+	Compensating int64
+	Paused       int64
+	Succeeded    int64
+	Failed       int64
+	Cancelled    int64
+	// Total is every DAG the backend still retains; a vacuumed run is counted
+	// nowhere, so this is not a lifetime total.
+	Total int64
+}
+
+// DefinitionInfo is one DAG definition the backend still holds runs for, with
+// those runs counted by state. (Definition itself is the graph builder in
+// define.go; this is the admin projection of a name that has been run.)
+type DefinitionInfo struct {
+	Name  string
+	Stats Stats
+}
+
+// Stats returns how many DAGs sit in each state, across every definition.
+func (m *Manager) Stats(ctx context.Context) (Stats, error) {
+	byName, err := m.store.DAGNameStateCounts(ctx)
+	if err != nil {
+		return Stats{}, err
+	}
+	var out Stats
+	for _, counts := range byName {
+		addCounts(&out, counts)
+	}
+	return out, nil
+}
+
+// Definitions returns every definition the backend holds runs for, sorted by
+// name, each with its runs counted by state.
+//
+// It is the definition navigator's one read, and it answers a question nothing
+// else does: Filter selects BY name, but no other call enumerates the names,
+// so a caller without this has to learn them from whichever page of List it
+// happens to be showing — which silently hides every definition whose runs are
+// off the current page.
+//
+// Same read as Stats (the counts are grouped by name and summed there), so a
+// screen showing both a navigator and a state-tab bar can serve them from one
+// call rather than two.
+func (m *Manager) Definitions(ctx context.Context) ([]DefinitionInfo, error) {
+	byName, err := m.store.DAGNameStateCounts(ctx)
+	if err != nil {
+		return nil, err
+	}
+	out := make([]DefinitionInfo, 0, len(byName))
+	for name, counts := range byName {
+		def := DefinitionInfo{Name: name}
+		addCounts(&def.Stats, counts)
+		out = append(out, def)
+	}
+	slices.SortFunc(out, func(a, b DefinitionInfo) int { return strings.Compare(a.Name, b.Name) })
+	return out, nil
+}
+
+// addCounts folds one per-state histogram into s.
+func addCounts(s *Stats, counts map[State]int64) {
+	for state, n := range counts {
+		switch state {
+		case StateRunning:
+			s.Running += n
+		case StateSuspended:
+			s.Suspended += n
+		case StateCompensating:
+			s.Compensating += n
+		case StatePaused:
+			s.Paused += n
+		case StateSucceeded:
+			s.Succeeded += n
+		case StateFailed:
+			s.Failed += n
+		case StateCancelled:
+			s.Cancelled += n
+		}
+		// An unknown state still counts toward Total: a backend ahead of this
+		// library must not make the tab bar's numbers stop adding up.
+		s.Total += n
+	}
+}
+
+// TaskCounts returns, per DAG id, how many of its tasks sit in each task
+// state — the batch read behind a listing that shows each run's progress.
+// Doing it per row instead would be one query per listed DAG.
+//
+// Ids with no tasks (unknown ones included) are absent from the result.
+func (m *Manager) TaskCounts(ctx context.Context, ids []uuid.UUID) (map[uuid.UUID]map[TaskState]int64, error) {
+	return m.store.DAGTaskCounts(ctx, ids)
 }
 
 // Retry resumes a non-terminal DAG after failures or an operator Pause:

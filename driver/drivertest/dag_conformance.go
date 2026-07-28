@@ -58,6 +58,10 @@ func RunDAGConformance(t *testing.T, newStore func(t *testing.T) driver.Store) {
 	t.Run("SkipSettlesTerminalAndSatisfiesDeps", func(t *testing.T) { runDAGSkip(t, store, ws) })
 	t.Run("PauseFreezesAndRetryResumes", func(t *testing.T) { runDAGPause(t, store, ws) })
 	t.Run("FindDAGByKeyResolvesTheLiveRun", func(t *testing.T) { runDAGFindByKey(t, store, ws) })
+	t.Run("DepsExposeTheGraph", func(t *testing.T) { runDAGDeps(t, store, ws) })
+	t.Run("StateCounts", func(t *testing.T) { runDAGStateCounts(t, store, ws) })
+	t.Run("TaskCounts", func(t *testing.T) { runDAGTaskCounts(t, store, ws) })
+	t.Run("StartedAtTracksTheCurrentAttempt", func(t *testing.T) { runDAGStartedAt(t, store, ws) })
 }
 
 // ---- shared helpers -------------------------------------------------------
@@ -1353,4 +1357,203 @@ func runDAGFindByKey(t *testing.T, store driver.Store, ws driver.DAGStore) {
 	is.True(driver.IsNotFound(err), "an unknown key is not-found")
 	_, err = ws.FindDAGByKey(ctx, "wfc_bykey_other", "acct-42")
 	is.True(driver.IsNotFound(err), "the key is scoped by definition name")
+}
+
+// ---- DAGDeps --------------------------------------------------------------
+
+// runDAGDeps pins the edge read the admin graph rests on. The shape under test
+// is a fan-out/fan-in — the case a timestamp ordering renders as a chain and
+// gets silently wrong — plus the compensation links, which land in the same
+// table later and must show up too.
+func runDAGDeps(t *testing.T, store driver.Store, ws driver.DAGStore) {
+	t.Helper()
+	ctx := context.Background()
+	is := require.New(t)
+
+	root := wfTask("root", "wfc_deps_root")
+	root.CompensationKind = "wfc_deps_undo_root"
+	fanA := wfTask("fan_a", "wfc_deps_fan_a")
+	fanB := wfTask("fan_b", "wfc_deps_fan_b")
+	sink := wfTask("sink", "wfc_deps_sink")
+	sink.MaxAttempts = 1
+	id := createWF(ctx, t, ws, driver.DAGParams{
+		Name: "wfc_deps", OnFailure: driver.OnFailureSuspend,
+		Tasks: []driver.DAGTask{root, fanA, fanB, sink},
+		Deps: []driver.DAGDep{
+			{TaskKey: "fan_a", DependsOnKey: "root"},
+			{TaskKey: "fan_b", DependsOnKey: "root"},
+			{TaskKey: "sink", DependsOnKey: "fan_a"},
+			{TaskKey: "sink", DependsOnKey: "fan_b"},
+		},
+	})
+
+	deps, err := ws.DAGDeps(ctx, id)
+	is.NoError(err)
+	is.Equal([]driver.DAGDep{
+		{TaskKey: "fan_a", DependsOnKey: "root"},
+		{TaskKey: "fan_b", DependsOnKey: "root"},
+		{TaskKey: "sink", DependsOnKey: "fan_a"},
+		{TaskKey: "sink", DependsOnKey: "fan_b"},
+	}, deps, "every declared edge is readable, ordered by (task_key, depends_on_key)")
+
+	got, err := ws.DAGDeps(ctx, uuid.New())
+	is.NoError(err, "an unknown dag is not an error here — DAGTasks reports absence")
+	is.Empty(got)
+
+	// Compensation links land in the same table, so the graph of a compensated
+	// run stays readable end to end.
+	finishWFTask(ctx, t, store, ws, "wfc_deps_root", nil)
+	promoteUnblocked(ctx, t, ws)
+	finishWFTask(ctx, t, store, ws, "wfc_deps_fan_a", nil)
+	finishWFTask(ctx, t, store, ws, "wfc_deps_fan_b", nil)
+	promoteUnblocked(ctx, t, ws)
+	killWFTask(ctx, t, store, "wfc_deps_sink")
+	applyPolicyFor(ctx, t, ws, id)
+	is.NoError(ws.CompensateDAG(ctx, id))
+
+	deps, err = ws.DAGDeps(ctx, id)
+	is.NoError(err)
+	is.Len(deps, 4, "compensating a run with one compensable task adds no edge between comps")
+	is.Equal("wfc_deps_undo_root", wfTaskByKey(ctx, t, ws, id, "comp:root").Kind,
+		"the compensation task itself exists and is reachable by key")
+}
+
+// ---- DAGNameStateCounts ---------------------------------------------------
+
+// runDAGStateCounts pins the histogram behind both the definition navigator
+// and the state tabs. Per-definition counts are asserted as absolutes (the
+// names are unique to this subtest); anything global is asserted as a DELTA,
+// because the suite shares one store and totals belong to no single subtest.
+func runDAGStateCounts(t *testing.T, store driver.Store, ws driver.DAGStore) {
+	t.Helper()
+	ctx := context.Background()
+	is := require.New(t)
+
+	globalRunning := func(m map[string]map[driver.DAGState]int64, state driver.DAGState) int64 {
+		var total int64
+		for _, counts := range m {
+			total += counts[state]
+		}
+		return total
+	}
+
+	before, err := ws.DAGNameStateCounts(ctx)
+	is.NoError(err)
+	is.NotContains(before, "wfc_counts_live", "a definition with no runs is absent, not zero-valued")
+
+	live := createWF(ctx, t, ws, driver.DAGParams{
+		Name: "wfc_counts_live", Tasks: []driver.DAGTask{wfTask("a", "wfc_counts_live_a")},
+	})
+	// Two runs of one definition: the navigator has to count runs per name, not
+	// report the name once.
+	createWF(ctx, t, ws, driver.DAGParams{
+		Name: "wfc_counts_live", Tasks: []driver.DAGTask{wfTask("a", "wfc_counts_live_b")},
+	})
+	done := createWF(ctx, t, ws, driver.DAGParams{
+		Name: "wfc_counts_done", Tasks: []driver.DAGTask{wfTask("a", "wfc_counts_done_a")},
+	})
+	finishWFTask(ctx, t, store, ws, "wfc_counts_done_a", nil)
+	completeDAGs(ctx, t, ws)
+	is.Equal(driver.DAGSucceeded, wfView(ctx, t, ws, done).State)
+
+	after, err := ws.DAGNameStateCounts(ctx)
+	is.NoError(err)
+	is.Equal(int64(2), after["wfc_counts_live"][driver.DAGRunning], "both runs of the definition count")
+	is.Equal(int64(1), after["wfc_counts_done"][driver.DAGSucceeded])
+	is.Equal(int64(2),
+		globalRunning(after, driver.DAGRunning)-globalRunning(before, driver.DAGRunning),
+		"summing the inner maps gives the global per-state count")
+
+	// A state change is reflected, not just an insert — and it moves within the
+	// definition, so a navigator's per-name numbers stay honest.
+	is.NoError(ws.CancelDAG(ctx, live))
+	final, err := ws.DAGNameStateCounts(ctx)
+	is.NoError(err)
+	is.Equal(int64(1), final["wfc_counts_live"][driver.DAGRunning], "the cancelled run left running")
+	is.Equal(int64(1), final["wfc_counts_live"][driver.DAGCancelled])
+}
+
+// ---- DAGTaskCounts --------------------------------------------------------
+
+func runDAGTaskCounts(t *testing.T, store driver.Store, ws driver.DAGStore) {
+	t.Helper()
+	ctx := context.Background()
+	is := require.New(t)
+
+	first := createWF(ctx, t, ws, driver.DAGParams{
+		Name: "wfc_tcounts_a",
+		Tasks: []driver.DAGTask{
+			wfTask("a", "wfc_tcounts_a_a"),
+			wfTask("b", "wfc_tcounts_a_b"),
+			wfTask("c", "wfc_tcounts_a_c"),
+		},
+		Deps: []driver.DAGDep{{TaskKey: "c", DependsOnKey: "a"}},
+	})
+	second := createWF(ctx, t, ws, driver.DAGParams{
+		Name: "wfc_tcounts_b", Tasks: []driver.DAGTask{wfTask("only", "wfc_tcounts_b_only")},
+	})
+
+	counts, err := ws.DAGTaskCounts(ctx, []uuid.UUID{first, second})
+	is.NoError(err)
+	is.Equal(map[driver.JobState]int64{driver.StatePending: 2, driver.StateBlocked: 1}, counts[first])
+	is.Equal(map[driver.JobState]int64{driver.StatePending: 1}, counts[second])
+
+	// The breakdown follows the tasks, so a listing shows real progress.
+	finishWFTask(ctx, t, store, ws, "wfc_tcounts_a_a", nil)
+	counts, err = ws.DAGTaskCounts(ctx, []uuid.UUID{first})
+	is.NoError(err)
+	is.Equal(map[driver.JobState]int64{
+		driver.StatePending: 1, driver.StateBlocked: 1, driver.StateSucceeded: 1,
+	}, counts[first])
+
+	// Unknown ids are absent rather than zero-valued, and an empty request is
+	// not a query.
+	counts, err = ws.DAGTaskCounts(ctx, []uuid.UUID{uuid.New()})
+	is.NoError(err)
+	is.Empty(counts)
+	counts, err = ws.DAGTaskCounts(ctx, nil)
+	is.NoError(err)
+	is.Empty(counts)
+}
+
+// ---- started_at -----------------------------------------------------------
+
+// runDAGStartedAt pins the stamp an admin surface reports execution time from.
+// It must move with the attempt, not with the row: a retried task that reused
+// its first stamp would report a duration spanning the backoff.
+func runDAGStartedAt(t *testing.T, store driver.Store, ws driver.DAGStore) {
+	t.Helper()
+	ctx := context.Background()
+	is := require.New(t)
+
+	task := wfTask("a", "wfc_started_a")
+	task.MaxAttempts = 3
+	id := createWF(ctx, t, ws, driver.DAGParams{
+		Name: "wfc_started", Tasks: []driver.DAGTask{task},
+	})
+
+	is.True(wfTaskByKey(ctx, t, ws, id, "a").StartedAt.IsZero(), "a task that never ran has no start")
+
+	leased := dequeueN(ctx, t, store, driver.SourceDAG, "wfc_started_a", 1, time.Minute)
+	is.Len(leased, 1)
+	first := wfTaskByKey(ctx, t, ws, id, "a").StartedAt
+	is.False(first.IsZero(), "the lease stamps the attempt's start")
+
+	// Fail it and lease again: the second attempt overwrites the stamp, so
+	// completed_at - started_at never spans a retry backoff.
+	is.NoError(store.Reschedule(ctx, leased[0].ID, leased[0].LeaseToken, 0, "boom"))
+	_, err := store.PromoteDue(ctx, driver.SourceDAG, []string{"wfc_started_a"})
+	is.NoError(err)
+	again := dequeueN(ctx, t, store, driver.SourceDAG, "wfc_started_a", 1, time.Minute)
+	is.Len(again, 1)
+	second := wfTaskByKey(ctx, t, ws, id, "a")
+	is.Equal(2, second.Attempt)
+	is.False(second.StartedAt.Before(first), "started_at moves forward with the attempt")
+
+	is.NoError(store.Dead(ctx, again[0].ID, again[0].LeaseToken, "boom"))
+	is.NoError(ws.RetryDAG(ctx, id))
+	retried := wfTaskByKey(ctx, t, ws, id, "a")
+	is.Equal(0, retried.Attempt)
+	is.True(retried.StartedAt.IsZero(),
+		"a retry clears the stamp with the attempt: nothing has started yet")
 }
