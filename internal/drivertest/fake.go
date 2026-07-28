@@ -434,6 +434,9 @@ func (f *Fake) DequeueBatch(_ context.Context, source driver.Source, p driver.De
 		j.State = driver.StateActive
 		j.LeaseToken = uuid.New()
 		j.LeaseUntil = now.Add(p.Lease)
+		// StartedAt moves with Attempt: each lease begins a new attempt, so
+		// the stamp always describes the attempt State and CompletedAt reflect.
+		j.StartedAt = now
 
 		leased := j.toJob()
 		if source == driver.SourceEvent {
@@ -918,6 +921,9 @@ func (f *Fake) resetToPending(j *fakeJob) {
 	j.ReapCount = 0
 	j.LastError = ""
 	j.FailedAt = time.Time{}
+	// Attempt is back to 0, so the stamp of the attempt that died no longer
+	// describes anything; the next lease sets it again.
+	j.StartedAt = time.Time{}
 	// A retried job waits with a fresh snooze budget: the stamped deadline is
 	// dropped and re-stamps on the next first snooze.
 	j.DeadlineAt = time.Time{}

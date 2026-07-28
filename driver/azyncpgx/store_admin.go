@@ -324,7 +324,7 @@ func (s *Store) JobAttempts(ctx context.Context, source driver.Source, id uuid.U
 const retryJobSQL = `
 UPDATE azync_jobs SET
 	state = 'pending', run_at = now(), attempt = 0, reap_count = 0,
-	last_error = NULL, failed_at = NULL, deadline_at = NULL, updated_at = now()
+	last_error = NULL, failed_at = NULL, deadline_at = NULL, started_at = NULL, updated_at = now()
 WHERE id = $1 AND source = $2 AND state = 'dead'`
 
 // RetryJob resets a dead job of the source to pending for immediate retry.
@@ -343,7 +343,7 @@ func (s *Store) RetryAllDead(ctx context.Context, source driver.Source, kind str
 	sql := `
 UPDATE azync_jobs SET
 	state = 'pending', run_at = now(), attempt = 0, reap_count = 0,
-	last_error = NULL, failed_at = NULL, deadline_at = NULL, updated_at = now()
+	last_error = NULL, failed_at = NULL, deadline_at = NULL, started_at = NULL, updated_at = now()
 WHERE id IN (
 	SELECT id FROM azync_jobs WHERE source = $1` + clause + ` AND state = 'dead' LIMIT $` + strconv.Itoa(len(args)) + `
 )`

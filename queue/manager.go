@@ -70,11 +70,16 @@ type JobView struct {
 	EnqueuedAt    time.Time
 	RunAt         time.Time
 	LeaseDeadline time.Time
-	FailedAt      time.Time
-	CompletedAt   time.Time
-	Payload       []byte
-	Meta          map[string]string
-	LastError     string
+	// StartedAt is when the current attempt was leased, so
+	// CompletedAt.Sub(StartedAt) is execution time — RunAt cannot answer that,
+	// being the due time a retry backoff or snooze rewrites. Zero before the
+	// first lease.
+	StartedAt   time.Time
+	FailedAt    time.Time
+	CompletedAt time.Time
+	Payload     []byte
+	Meta        map[string]string
+	LastError   string
 }
 
 // JobListPage is one page of jobs for a queue+state.
@@ -317,6 +322,7 @@ func toJobView(r driver.Job) JobView {
 		EnqueuedAt:    r.EnqueuedAt,
 		RunAt:         r.RunAt,
 		LeaseDeadline: r.LeaseUntil,
+		StartedAt:     r.StartedAt,
 		FailedAt:      r.FailedAt,
 		CompletedAt:   r.CompletedAt,
 		Payload:       r.Payload,

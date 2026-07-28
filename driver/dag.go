@@ -374,6 +374,30 @@ type DAGStore interface {
 	// not exist.
 	DAGTasks(ctx context.Context, id uuid.UUID) ([]Job, error)
 
+	// DAGDeps returns every dependency edge of the workflow — the static edges
+	// declared at Run plus the compensation-chain links inserted when
+	// compensation starts — ordered by (task_key, depends_on_key). It is the
+	// read half of what CreateDAG persists: the scheduler only ever asks these
+	// rows "is this task unblocked?", so without it the graph is unreadable
+	// from outside and an admin surface has to guess the shape of a run from
+	// timestamps, which silently turns a parallel fan-out into a chain.
+	//
+	// An unknown id returns no rows rather than an error: callers pair this
+	// with DAGTasks, which already reports absence.
+	DAGDeps(ctx context.Context, id uuid.UUID) ([]DAGDep, error)
+
+	// DAGStateCounts returns how many dags sit in each state, counting every
+	// dag the backend still retains. States with no dags may be absent from
+	// the map rather than present with a zero.
+	DAGStateCounts(ctx context.Context) (map[DAGState]int64, error)
+
+	// DAGTaskCounts returns, per requested dag, how many of its tasks sit in
+	// each task state — the one read that lets a listing show each run's task
+	// breakdown without a DAGTasks call per row. Ids with no tasks (unknown
+	// ones included) may be absent from the map rather than present with an
+	// empty one; an empty ids slice returns an empty map without querying.
+	DAGTaskCounts(ctx context.Context, ids []uuid.UUID) (map[uuid.UUID]map[JobState]int64, error)
+
 	// RetryDAG resumes a non-terminal workflow after failures: dead tasks
 	// are reset to pending with a fresh budget (attempt and reap_count
 	// cleared) and a suspended workflow resumes — to running, or back to

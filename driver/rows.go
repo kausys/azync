@@ -236,6 +236,12 @@ type Job struct {
 	EnqueuedAt  time.Time
 	FailedAt    time.Time
 	CompletedAt time.Time
+	// StartedAt is when the CURRENT attempt was leased — rewritten by every
+	// lease, so for a settled job CompletedAt.Sub(StartedAt) is the duration of
+	// the last attempt (earlier ones are timestamped in the attempt history).
+	// Zero before the first lease, and for rows written before the backend
+	// recorded it.
+	StartedAt time.Time
 }
 
 // EventRecord is a rehydrated row from the append-only event ledger. It is the

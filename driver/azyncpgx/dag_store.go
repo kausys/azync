@@ -997,6 +997,99 @@ func (s *Store) DAGTasks(ctx context.Context, id uuid.UUID) ([]driver.Job, error
 	return collectJobs(rows)
 }
 
+// dagDepsSQL reads the workflow's edges. The primary key is
+// (dag_id, task_key, depends_on_key), so this is an index-only scan and the
+// ORDER BY is free.
+const dagDepsSQL = `
+SELECT task_key, depends_on_key FROM azync_dag_deps
+WHERE dag_id = $1 ORDER BY task_key, depends_on_key`
+
+// DAGDeps returns every dependency edge of the workflow, compensation-chain
+// links included. An unknown id yields no rows, not an error.
+func (s *Store) DAGDeps(ctx context.Context, id uuid.UUID) ([]driver.DAGDep, error) {
+	rows, err := s.pool.Query(ctx, dagDepsSQL, id)
+	if err != nil {
+		return nil, fmt.Errorf("azyncpgx: dag deps: %w", err)
+	}
+	defer rows.Close()
+	var out []driver.DAGDep
+	for rows.Next() {
+		var d driver.DAGDep
+		if err := rows.Scan(&d.TaskKey, &d.DependsOnKey); err != nil {
+			return nil, fmt.Errorf("azyncpgx: scan dag dep: %w", err)
+		}
+		out = append(out, d)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("azyncpgx: iterate dag deps: %w", err)
+	}
+	return out, nil
+}
+
+// dagStateCountsSQL counts every retained dag by state. Backed by
+// azync_dags_state_idx (00010) — the 00002/00009 indexes are all partial on
+// the live states, so without it this scans the full table.
+const dagStateCountsSQL = `SELECT state, COUNT(*)::bigint FROM azync_dags GROUP BY state`
+
+// DAGStateCounts returns how many dags sit in each state.
+func (s *Store) DAGStateCounts(ctx context.Context) (map[driver.DAGState]int64, error) {
+	rows, err := s.pool.Query(ctx, dagStateCountsSQL)
+	if err != nil {
+		return nil, fmt.Errorf("azyncpgx: dag state counts: %w", err)
+	}
+	defer rows.Close()
+	out := make(map[driver.DAGState]int64)
+	for rows.Next() {
+		var state string
+		var n int64
+		if err := rows.Scan(&state, &n); err != nil {
+			return nil, fmt.Errorf("azyncpgx: scan dag state count: %w", err)
+		}
+		out[driver.DAGState(state)] = n
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("azyncpgx: iterate dag state counts: %w", err)
+	}
+	return out, nil
+}
+
+// dagTaskCountsSQL breaks one page of dags down by task state in a single
+// round trip, served by the unique (dag_id, task_key) index.
+const dagTaskCountsSQL = `
+SELECT dag_id, state, COUNT(*)::bigint FROM azync_jobs
+WHERE source = 'dag' AND dag_id = ANY($1) GROUP BY dag_id, state`
+
+// DAGTaskCounts returns each requested dag's task breakdown by state. Ids with
+// no tasks are absent from the result; an empty ids slice queries nothing.
+func (s *Store) DAGTaskCounts(ctx context.Context, ids []uuid.UUID) (map[uuid.UUID]map[driver.JobState]int64, error) {
+	out := make(map[uuid.UUID]map[driver.JobState]int64, len(ids))
+	if len(ids) == 0 {
+		return out, nil
+	}
+	rows, err := s.pool.Query(ctx, dagTaskCountsSQL, ids)
+	if err != nil {
+		return nil, fmt.Errorf("azyncpgx: dag task counts: %w", err)
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var id pgtype.UUID
+		var state string
+		var n int64
+		if err := rows.Scan(&id, &state, &n); err != nil {
+			return nil, fmt.Errorf("azyncpgx: scan dag task count: %w", err)
+		}
+		dagID := toUUID(id)
+		if out[dagID] == nil {
+			out[dagID] = make(map[driver.JobState]int64)
+		}
+		out[dagID][driver.JobState(state)] = n
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("azyncpgx: iterate dag task counts: %w", err)
+	}
+	return out, nil
+}
+
 // requireDAG maps a missing workflow header to the contract's not-found.
 func (s *Store) requireDAG(ctx context.Context, op string, id uuid.UUID) error {
 	var exists bool
@@ -1018,7 +1111,7 @@ func (s *Store) requireDAG(ctx context.Context, op string, id uuid.UUID) error {
 const resetDeadTasksSQL = `
 UPDATE azync_jobs SET
 	state = 'pending', run_at = now(), attempt = 0, reap_count = 0,
-	last_error = NULL, failed_at = NULL, deadline_at = NULL, updated_at = now()
+	last_error = NULL, failed_at = NULL, deadline_at = NULL, started_at = NULL, updated_at = now()
 WHERE dag_id = $1 AND source = 'dag' AND state = 'dead'
 	AND (NOT $2 OR task_key LIKE 'comp:%')
 RETURNING kind`

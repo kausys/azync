@@ -776,6 +776,61 @@ func (f *Fake) DAGTasks(_ context.Context, id uuid.UUID) ([]driver.Job, error) {
 	return out, nil
 }
 
+// DAGDeps returns the workflow's edges, compensation-chain links included,
+// ordered by (task_key, depends_on_key). An unknown id yields no rows.
+func (f *Fake) DAGDeps(_ context.Context, id uuid.UUID) ([]driver.DAGDep, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	w := f.dags[id]
+	if w == nil {
+		return nil, nil
+	}
+	out := slices.Clone(w.deps)
+	slices.SortFunc(out, func(a, b driver.DAGDep) int {
+		if c := strings.Compare(a.TaskKey, b.TaskKey); c != 0 {
+			return c
+		}
+		return strings.Compare(a.DependsOnKey, b.DependsOnKey)
+	})
+	return out, nil
+}
+
+// DAGStateCounts counts every retained workflow by state.
+func (f *Fake) DAGStateCounts(_ context.Context) (map[driver.DAGState]int64, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	out := make(map[driver.DAGState]int64)
+	for _, w := range f.dags {
+		out[w.State]++
+	}
+	return out, nil
+}
+
+// DAGTaskCounts breaks each requested workflow down by task state. Ids with no
+// tasks are absent from the result.
+func (f *Fake) DAGTaskCounts(_ context.Context, ids []uuid.UUID) (map[uuid.UUID]map[driver.JobState]int64, error) {
+	out := make(map[uuid.UUID]map[driver.JobState]int64, len(ids))
+	if len(ids) == 0 {
+		return out, nil
+	}
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	wanted := make(map[uuid.UUID]bool, len(ids))
+	for _, id := range ids {
+		wanted[id] = true
+	}
+	for _, j := range f.jobs {
+		if j.Source != driver.SourceDAG || !wanted[j.DAGID] {
+			continue
+		}
+		if out[j.DAGID] == nil {
+			out[j.DAGID] = make(map[driver.JobState]int64)
+		}
+		out[j.DAGID][j.State]++
+	}
+	return out, nil
+}
+
 // RetryDAG resumes a non-terminal workflow after failures. On a workflow
 // with a compensation chain only the dead compensation tasks are reset and the
 // workflow resumes compensating (original tasks never rerun once compensation
