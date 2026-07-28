@@ -1,5 +1,23 @@
 # Changelog
 
+## [0.0.7](https://github.com/kausys/azync/compare/v0.0.6...v0.0.7) (2026-07-28)
+
+
+### ⚠ BREAKING CHANGES
+
+* driver.DAGStore gains DAGDeps, DAGNameStateCounts and DAGTaskCounts (custom driver implementations must add them).
+
+### Features
+
+* enumerate DAG definitions with their run counts ([5ec244e](https://github.com/kausys/azync/commit/5ec244ef0b224e5aa6ba7fe27cae0c1df6147b61))
+* expose the DAG graph, task timing and admin counts ([5f327d5](https://github.com/kausys/azync/commit/5f327d52f3d2777b10b4985f80024868729da79f))
+
+
+### Miscellaneous
+
+* pin this cycle to 0.0.7 ([297a908](https://github.com/kausys/azync/commit/297a90899c55d720d969cc6d67d70b33b56dcfa2))
+* pin this cycle to 0.0.7 and document the footer that does it ([bdc17d9](https://github.com/kausys/azync/commit/bdc17d941d33584f61fb4bfcaa1fcd833589f035))
+
 ## [0.0.6](https://github.com/kausys/azync/compare/v0.0.5...v0.0.6) (2026-07-27)
 
 
