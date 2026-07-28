@@ -5,8 +5,7 @@
 
 ### ⚠ BREAKING CHANGES
 
-* driver.DAGStore gains DAGNameStateCounts in place of the DAGStateCounts added earlier on this branch.
-* driver.DAGStore gains DAGDeps, DAGStateCounts and DAGTaskCounts (custom driver implementations must add them).
+* driver.DAGStore gains DAGDeps, DAGNameStateCounts and DAGTaskCounts (custom driver implementations must add them).
 
 ### Features
 
