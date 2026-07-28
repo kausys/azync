@@ -795,13 +795,16 @@ func (f *Fake) DAGDeps(_ context.Context, id uuid.UUID) ([]driver.DAGDep, error)
 	return out, nil
 }
 
-// DAGStateCounts counts every retained workflow by state.
-func (f *Fake) DAGStateCounts(_ context.Context) (map[driver.DAGState]int64, error) {
+// DAGNameStateCounts counts every retained workflow by (definition, state).
+func (f *Fake) DAGNameStateCounts(_ context.Context) (map[string]map[driver.DAGState]int64, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	out := make(map[driver.DAGState]int64)
+	out := make(map[string]map[driver.DAGState]int64)
 	for _, w := range f.dags {
-		out[w.State]++
+		if out[w.Name] == nil {
+			out[w.Name] = make(map[driver.DAGState]int64)
+		}
+		out[w.Name][w.State]++
 	}
 	return out, nil
 }

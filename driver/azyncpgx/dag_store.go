@@ -1026,29 +1026,33 @@ func (s *Store) DAGDeps(ctx context.Context, id uuid.UUID) ([]driver.DAGDep, err
 	return out, nil
 }
 
-// dagStateCountsSQL counts every retained dag by state. Backed by
-// azync_dags_state_idx (00010) — the 00002/00009 indexes are all partial on
-// the live states, so without it this scans the full table.
-const dagStateCountsSQL = `SELECT state, COUNT(*)::bigint FROM azync_dags GROUP BY state`
+// dagNameStateCountsSQL counts every retained dag by (definition, state).
+// Backed by azync_dags_name_state_idx (00010) — the 00002/00009 indexes are
+// all partial on the live states, so without it this scans the full table
+// including terminal history.
+const dagNameStateCountsSQL = `SELECT name, state, COUNT(*)::bigint FROM azync_dags GROUP BY name, state`
 
-// DAGStateCounts returns how many dags sit in each state.
-func (s *Store) DAGStateCounts(ctx context.Context) (map[driver.DAGState]int64, error) {
-	rows, err := s.pool.Query(ctx, dagStateCountsSQL)
+// DAGNameStateCounts returns how many dags sit in each state, per definition.
+func (s *Store) DAGNameStateCounts(ctx context.Context) (map[string]map[driver.DAGState]int64, error) {
+	rows, err := s.pool.Query(ctx, dagNameStateCountsSQL)
 	if err != nil {
-		return nil, fmt.Errorf("azyncpgx: dag state counts: %w", err)
+		return nil, fmt.Errorf("azyncpgx: dag name state counts: %w", err)
 	}
 	defer rows.Close()
-	out := make(map[driver.DAGState]int64)
+	out := make(map[string]map[driver.DAGState]int64)
 	for rows.Next() {
-		var state string
+		var name, state string
 		var n int64
-		if err := rows.Scan(&state, &n); err != nil {
-			return nil, fmt.Errorf("azyncpgx: scan dag state count: %w", err)
+		if err := rows.Scan(&name, &state, &n); err != nil {
+			return nil, fmt.Errorf("azyncpgx: scan dag name state count: %w", err)
 		}
-		out[driver.DAGState(state)] = n
+		if out[name] == nil {
+			out[name] = make(map[driver.DAGState]int64)
+		}
+		out[name][driver.DAGState(state)] = n
 	}
 	if err := rows.Err(); err != nil {
-		return nil, fmt.Errorf("azyncpgx: iterate dag state counts: %w", err)
+		return nil, fmt.Errorf("azyncpgx: iterate dag name state counts: %w", err)
 	}
 	return out, nil
 }

@@ -4,6 +4,8 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"slices"
+	"strings"
 	"time"
 
 	"github.com/kausys/azync/driver"
@@ -299,35 +301,77 @@ type Stats struct {
 	Total int64
 }
 
-// Stats returns how many DAGs sit in each state.
+// DefinitionInfo is one DAG definition the backend still holds runs for, with
+// those runs counted by state. (Definition itself is the graph builder in
+// define.go; this is the admin projection of a name that has been run.)
+type DefinitionInfo struct {
+	Name  string
+	Stats Stats
+}
+
+// Stats returns how many DAGs sit in each state, across every definition.
 func (m *Manager) Stats(ctx context.Context) (Stats, error) {
-	counts, err := m.store.DAGStateCounts(ctx)
+	byName, err := m.store.DAGNameStateCounts(ctx)
 	if err != nil {
 		return Stats{}, err
 	}
 	var out Stats
+	for _, counts := range byName {
+		addCounts(&out, counts)
+	}
+	return out, nil
+}
+
+// Definitions returns every definition the backend holds runs for, sorted by
+// name, each with its runs counted by state.
+//
+// It is the definition navigator's one read, and it answers a question nothing
+// else does: Filter selects BY name, but no other call enumerates the names,
+// so a caller without this has to learn them from whichever page of List it
+// happens to be showing — which silently hides every definition whose runs are
+// off the current page.
+//
+// Same read as Stats (the counts are grouped by name and summed there), so a
+// screen showing both a navigator and a state-tab bar can serve them from one
+// call rather than two.
+func (m *Manager) Definitions(ctx context.Context) ([]DefinitionInfo, error) {
+	byName, err := m.store.DAGNameStateCounts(ctx)
+	if err != nil {
+		return nil, err
+	}
+	out := make([]DefinitionInfo, 0, len(byName))
+	for name, counts := range byName {
+		def := DefinitionInfo{Name: name}
+		addCounts(&def.Stats, counts)
+		out = append(out, def)
+	}
+	slices.SortFunc(out, func(a, b DefinitionInfo) int { return strings.Compare(a.Name, b.Name) })
+	return out, nil
+}
+
+// addCounts folds one per-state histogram into s.
+func addCounts(s *Stats, counts map[State]int64) {
 	for state, n := range counts {
 		switch state {
 		case StateRunning:
-			out.Running = n
+			s.Running += n
 		case StateSuspended:
-			out.Suspended = n
+			s.Suspended += n
 		case StateCompensating:
-			out.Compensating = n
+			s.Compensating += n
 		case StatePaused:
-			out.Paused = n
+			s.Paused += n
 		case StateSucceeded:
-			out.Succeeded = n
+			s.Succeeded += n
 		case StateFailed:
-			out.Failed = n
+			s.Failed += n
 		case StateCancelled:
-			out.Cancelled = n
+			s.Cancelled += n
 		}
 		// An unknown state still counts toward Total: a backend ahead of this
 		// library must not make the tab bar's numbers stop adding up.
-		out.Total += n
+		s.Total += n
 	}
-	return out, nil
 }
 
 // TaskCounts returns, per DAG id, how many of its tasks sit in each task

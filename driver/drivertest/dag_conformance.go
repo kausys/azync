@@ -1418,20 +1418,36 @@ func runDAGDeps(t *testing.T, store driver.Store, ws driver.DAGStore) {
 		"the compensation task itself exists and is reachable by key")
 }
 
-// ---- DAGStateCounts -------------------------------------------------------
+// ---- DAGNameStateCounts ---------------------------------------------------
 
-// runDAGStateCounts asserts the state histogram as a DELTA: the suite shares
-// one store, so absolute counts belong to no single subtest.
+// runDAGStateCounts pins the histogram behind both the definition navigator
+// and the state tabs. Per-definition counts are asserted as absolutes (the
+// names are unique to this subtest); anything global is asserted as a DELTA,
+// because the suite shares one store and totals belong to no single subtest.
 func runDAGStateCounts(t *testing.T, store driver.Store, ws driver.DAGStore) {
 	t.Helper()
 	ctx := context.Background()
 	is := require.New(t)
 
-	before, err := ws.DAGStateCounts(ctx)
+	globalRunning := func(m map[string]map[driver.DAGState]int64, state driver.DAGState) int64 {
+		var total int64
+		for _, counts := range m {
+			total += counts[state]
+		}
+		return total
+	}
+
+	before, err := ws.DAGNameStateCounts(ctx)
 	is.NoError(err)
+	is.NotContains(before, "wfc_counts_live", "a definition with no runs is absent, not zero-valued")
 
 	live := createWF(ctx, t, ws, driver.DAGParams{
 		Name: "wfc_counts_live", Tasks: []driver.DAGTask{wfTask("a", "wfc_counts_live_a")},
+	})
+	// Two runs of one definition: the navigator has to count runs per name, not
+	// report the name once.
+	createWF(ctx, t, ws, driver.DAGParams{
+		Name: "wfc_counts_live", Tasks: []driver.DAGTask{wfTask("a", "wfc_counts_live_b")},
 	})
 	done := createWF(ctx, t, ws, driver.DAGParams{
 		Name: "wfc_counts_done", Tasks: []driver.DAGTask{wfTask("a", "wfc_counts_done_a")},
@@ -1440,17 +1456,21 @@ func runDAGStateCounts(t *testing.T, store driver.Store, ws driver.DAGStore) {
 	completeDAGs(ctx, t, ws)
 	is.Equal(driver.DAGSucceeded, wfView(ctx, t, ws, done).State)
 
-	after, err := ws.DAGStateCounts(ctx)
+	after, err := ws.DAGNameStateCounts(ctx)
 	is.NoError(err)
-	is.Equal(int64(1), after[driver.DAGRunning]-before[driver.DAGRunning], "one dag entered running")
-	is.Equal(int64(1), after[driver.DAGSucceeded]-before[driver.DAGSucceeded], "one dag settled succeeded")
+	is.Equal(int64(2), after["wfc_counts_live"][driver.DAGRunning], "both runs of the definition count")
+	is.Equal(int64(1), after["wfc_counts_done"][driver.DAGSucceeded])
+	is.Equal(int64(2),
+		globalRunning(after, driver.DAGRunning)-globalRunning(before, driver.DAGRunning),
+		"summing the inner maps gives the global per-state count")
 
-	// A state change is reflected, not just an insert.
+	// A state change is reflected, not just an insert — and it moves within the
+	// definition, so a navigator's per-name numbers stay honest.
 	is.NoError(ws.CancelDAG(ctx, live))
-	final, err := ws.DAGStateCounts(ctx)
+	final, err := ws.DAGNameStateCounts(ctx)
 	is.NoError(err)
-	is.Equal(int64(0), final[driver.DAGRunning]-before[driver.DAGRunning], "the cancelled run left running")
-	is.Equal(int64(1), final[driver.DAGCancelled]-before[driver.DAGCancelled])
+	is.Equal(int64(1), final["wfc_counts_live"][driver.DAGRunning], "the cancelled run left running")
+	is.Equal(int64(1), final["wfc_counts_live"][driver.DAGCancelled])
 }
 
 // ---- DAGTaskCounts --------------------------------------------------------

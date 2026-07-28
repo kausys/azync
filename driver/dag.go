@@ -386,10 +386,18 @@ type DAGStore interface {
 	// with DAGTasks, which already reports absence.
 	DAGDeps(ctx context.Context, id uuid.UUID) ([]DAGDep, error)
 
-	// DAGStateCounts returns how many dags sit in each state, counting every
-	// dag the backend still retains. States with no dags may be absent from
-	// the map rather than present with a zero.
-	DAGStateCounts(ctx context.Context) (map[DAGState]int64, error)
+	// DAGNameStateCounts returns how many dags sit in each state, per
+	// definition name, counting every dag the backend still retains. Names and
+	// states with no dags may be absent rather than present with a zero.
+	//
+	// It is keyed by name rather than global because the set of names is
+	// itself an answer nothing else provides: ListDAGs filters BY name but
+	// never enumerates them, so an admin surface offering a definition
+	// navigator (as the queue one does over ListKinds) would otherwise have to
+	// learn names from whichever page happened to be on screen. Summing the
+	// inner maps gives the global per-state counts, so this is one read, not
+	// two.
+	DAGNameStateCounts(ctx context.Context) (map[string]map[DAGState]int64, error)
 
 	// DAGTaskCounts returns, per requested dag, how many of its tasks sit in
 	// each task state — the one read that lets a listing show each run's task

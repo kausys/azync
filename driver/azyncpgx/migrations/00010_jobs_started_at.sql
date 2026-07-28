@@ -20,12 +20,14 @@
 -- whole convergence. Pinned by TestMigrateConvergesFromDriftedTenantTraceSchema.
 ALTER TABLE azync_jobs ADD COLUMN IF NOT EXISTS started_at timestamptz NULL;
 
--- DAGStateCounts groups every dag by state to feed the admin state tabs. Every
--- index from 00002/00009 is partial on the live states, so an unrestricted
--- GROUP BY state falls back to a sequential scan over the full table including
--- terminal history. This index makes it an index-only scan.
-CREATE INDEX IF NOT EXISTS azync_dags_state_idx ON azync_dags (state);
+-- DAGNameStateCounts groups every dag by (name, state) to feed the admin's
+-- definition navigator and its state tabs from one read. Every index from
+-- 00002/00009 is partial on the live states, so an unrestricted GROUP BY falls
+-- back to a sequential scan over the full table including terminal history.
+-- The column order is (name, state) rather than (state) because the grouping
+-- is by both and the leading column is the one a caller also filters on.
+CREATE INDEX IF NOT EXISTS azync_dags_name_state_idx ON azync_dags (name, state);
 
 -- +goose Down
-DROP INDEX IF EXISTS azync_dags_state_idx;
+DROP INDEX IF EXISTS azync_dags_name_state_idx;
 ALTER TABLE azync_jobs DROP COLUMN IF EXISTS started_at;
