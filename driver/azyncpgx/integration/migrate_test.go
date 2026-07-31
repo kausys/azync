@@ -48,6 +48,39 @@ func columnExists(t *testing.T, pool *pgxpool.Pool, table, column string) bool {
 	return exists
 }
 
+// triggerExists reports whether the named user trigger exists on the table in
+// the current schema. NOT tgisinternal excludes the FK constraint triggers
+// Postgres itself maintains on azync_jobs.
+func triggerExists(t *testing.T, pool *pgxpool.Pool, table, name string) bool {
+	t.Helper()
+	var exists bool
+	require.NoError(t, pool.QueryRow(context.Background(), `
+		SELECT EXISTS (
+			SELECT 1
+			FROM pg_trigger tg
+			JOIN pg_class c ON c.oid = tg.tgrelid
+			JOIN pg_namespace n ON n.oid = c.relnamespace
+			WHERE n.nspname = current_schema()
+				AND c.relname = $1 AND tg.tgname = $2 AND NOT tg.tgisinternal
+		)`, table, name).Scan(&exists))
+	return exists
+}
+
+// functionExists reports whether the named function exists in the current
+// schema.
+func functionExists(t *testing.T, pool *pgxpool.Pool, name string) bool {
+	t.Helper()
+	var exists bool
+	require.NoError(t, pool.QueryRow(context.Background(), `
+		SELECT EXISTS (
+			SELECT 1
+			FROM pg_proc p
+			JOIN pg_namespace n ON n.oid = p.pronamespace
+			WHERE n.nspname = current_schema() AND p.proname = $1
+		)`, name).Scan(&exists))
+	return exists
+}
+
 // TestMigrateCreatesSchemaAndIsIdempotent proves Migrate creates the schema and
 // its tables (including the default version table), that it is required before
 // use, and that running it again is a no-op.
@@ -190,6 +223,32 @@ func TestMigrateConvergesFromDriftedTenantTraceSchema(t *testing.T) {
 	// Idempotent: running again (the normal case, version already recorded)
 	// is a no-op and does not error.
 	is.NoError(core.Migrate(ctx))
+}
+
+// changeTriggerObjects are the trigger/function pairs 00011 installs.
+var changeTriggerObjects = []struct{ table, trigger, function string }{
+	{"azync_jobs", "azync_changes_jobs_ins", "azync_changes_jobs_ins_fn"},
+	{"azync_jobs", "azync_changes_jobs_upd", "azync_changes_jobs_upd_fn"},
+	{"azync_dags", "azync_changes_dags_ins", "azync_changes_dags_ins_fn"},
+	{"azync_dags", "azync_changes_dags_upd", "azync_changes_dags_upd_fn"},
+	{"azync_events", "azync_changes_events_ins", "azync_changes_events_ins_fn"},
+}
+
+// TestMigrateCreatesChangeTriggers proves 00011 installs the change-hint
+// triggers and their functions in the migrated schema.
+func TestMigrateCreatesChangeTriggers(t *testing.T) {
+	is := require.New(t)
+	base := requireDB(t)
+	schema := newSchema(t, base)
+	core := openUnmigrated(t, base, schema)
+	is.NoError(core.Migrate(context.Background()))
+
+	pool := newPool(t, base, schema)
+	for _, obj := range changeTriggerObjects {
+		is.True(functionExists(t, pool, obj.function), "%s must exist", obj.function)
+		is.True(triggerExists(t, pool, obj.table, obj.trigger),
+			"%s must exist on %s", obj.trigger, obj.table)
+	}
 }
 
 // TestOldOnConflictPredicateInfersAgainstNewLiveIndex pins the rolling-deploy

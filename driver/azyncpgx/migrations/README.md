@@ -63,3 +63,16 @@ runtime, not just a slow migration:
 at install time; they are not rewritten (see above) and remain a hazard only
 for upgrading an already-populated `azync_jobs` — a risk that is now closed
 for every migration from `00005` on.
+
+## Triggers
+
+`00011` introduces the first triggers: statement-level change-hint emitters
+on `azync_jobs`, `azync_dags` and `azync_events` backing the
+`driver.ChangeNotifier` capability (see that file's header comment for the
+full rationale). Two rules they establish:
+
+- `CREATE OR REPLACE TRIGGER` is PG14+ and this driver supports PG13, so
+  trigger idempotency is `DROP TRIGGER IF EXISTS` + `CREATE TRIGGER`
+  (functions use `CREATE OR REPLACE FUNCTION`).
+- Any `$$ ... $$` body **must** be wrapped in `-- +goose StatementBegin` /
+  `-- +goose StatementEnd`, or goose's semicolon splitter shreds it.

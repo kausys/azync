@@ -54,3 +54,20 @@ func TestWorkflowConformanceSkipsWithoutCapability(t *testing.T) {
 		return driver.UnimplementedStore{}
 	})
 }
+
+// TestChangeNotifierConformanceFake runs the change-notifier conformance
+// suite against the in-memory fake, which implements driver.ChangeNotifier
+// as the behavioral oracle for the watch runtime.
+func TestChangeNotifierConformanceFake(t *testing.T) {
+	drivertest.RunChangeNotifierConformance(t, newFakeStore)
+}
+
+// TestChangeNotifierConformanceSkipsWithoutCapability proves the
+// change-notifier suite skips cleanly (instead of failing) for a store that
+// does not implement the optional driver.ChangeNotifier capability.
+func TestChangeNotifierConformanceSkipsWithoutCapability(t *testing.T) {
+	drivertest.RunChangeNotifierConformance(t, func(t *testing.T) driver.Store {
+		t.Helper()
+		return driver.UnimplementedStore{}
+	})
+}

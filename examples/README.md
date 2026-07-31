@@ -7,6 +7,7 @@ Runnable programs demonstrating the public API. This is a separate Go module (`e
 - **shared-core** — one `Core` powering queue, event, dag, and workflow at once: a projector (event → queue), plus a one-task DAG and a one-Operation workflow to prove coexistence.
 - **dag-basic** — a durable DAG shaped like a real onboarding saga: a typed chain whose outputs flow through `ResultOf`, a `NotReady` provider poll, a signal delivered by a simulated webhook, a fan-out, and an idempotent barrier that launches a second DAG. Runs the flow to completion and exits.
 - **workflow-kyc** — a workflow-as-code (`package workflow`) KYC onboarding flow: an `Operation` polls a verification provider, a durable `Timer` paces the polling, and a `Select` races a human approval `Signal` against a review deadline `Timer`. Vendor-neutral — no dependency on any specific verification provider's SDK. Runs one workflow to completion and exits.
+- **watch-sse** — bridge the `watch` change-hint stream to Server-Sent Events with plain `net/http`: a queue worker generates job traffic, `/stream` fans the hints out, and a dependency-free page renders them live (open http://localhost:8091). Demonstrates the reset-means-refetch consumer rule.
 
 ## Running
 
@@ -24,9 +25,10 @@ go run ./event-basic
 go run ./shared-core
 go run ./dag-basic
 go run ./workflow-kyc
+go run ./watch-sse
 ```
 
-Each program migrates the schema on startup. `queue-basic`, `event-basic` and `shared-core` run until interrupted (Ctrl-C); `dag-basic` and `workflow-kyc` each drive one execution to completion and exit.
+Each program migrates the schema on startup. `queue-basic`, `event-basic`, `shared-core` and `watch-sse` run until interrupted (Ctrl-C); `dag-basic` and `workflow-kyc` each drive one execution to completion and exit.
 
 By default every example connects to `postgres://azync:azync@localhost:5433/azync?sslmode=disable` (the compose default). Point at a different database with `DATABASE_URL`:
 

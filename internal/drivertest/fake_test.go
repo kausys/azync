@@ -581,9 +581,10 @@ func TestListJobsOrdering(t *testing.T) {
 	})
 }
 
-// The fake must satisfy the driver contract and both optional capabilities.
+// The fake must satisfy the driver contract and its optional capabilities.
 var (
-	_ driver.Store         = (*drivertest.Fake)(nil)
-	_ driver.Notifier      = (*drivertest.Fake)(nil)
-	_ driver.LeaderElector = (*drivertest.Fake)(nil)
+	_ driver.Store          = (*drivertest.Fake)(nil)
+	_ driver.Notifier       = (*drivertest.Fake)(nil)
+	_ driver.LeaderElector  = (*drivertest.Fake)(nil)
+	_ driver.ChangeNotifier = (*drivertest.Fake)(nil)
 )

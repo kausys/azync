@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"log/slog"
+	"sync"
 	"time"
 
 	"github.com/kausys/azync"
@@ -30,7 +31,8 @@ const pingTimeout = 5 * time.Second
 // Store is the PostgreSQL (pgx v5) implementation of driver.Store and its
 // optional capabilities. It operates the single azync_jobs table, partitioning
 // queue jobs and event deliveries by the source discriminator, and keeps one
-// dedicated LISTEN connection for push wakeups.
+// dedicated LISTEN connection for push wakeups plus a second, lazily-opened
+// one for change notifications (see Changes).
 type Store struct {
 	pool     *pgxpool.Pool
 	ownsPool bool
@@ -43,7 +45,13 @@ type Store struct {
 	statsSlots       int
 	maintenanceBatch int
 
-	listener *listener
+	listener *listener[driver.Wake]
+	changes  *listener[driver.Change]
+
+	// changeSchemaMu guards changeSchema, the schema name change payloads
+	// are filtered by (see resolveChangeSchema).
+	changeSchemaMu sync.Mutex
+	changeSchema   string
 }
 
 // defaultStatsSlots is the number of shards azync_stats_daily rows are spread
@@ -208,7 +216,10 @@ func (s *Store) finishInit() {
 	if s.maintenanceBatch <= 0 {
 		s.maintenanceBatch = defaultMaintenanceBatch
 	}
-	s.listener = newListener(s.pool, s.notifyChannel, s.pollOnly, s.logger)
+	s.listener = newListener(s.pool, s.notifyChannel, s.pollOnly, s.logger,
+		wakeBuffer, parseWake, nil)
+	s.changes = newListener(s.pool, changeChannel, s.pollOnly, s.logger,
+		changeBuffer, s.parseChangePayload, resetChange)
 }
 
 // defaultChannel is azync, or azync_<schema> when a schema is set and the result
@@ -224,10 +235,11 @@ func defaultChannel(schema string) string {
 	return candidate
 }
 
-// Close stops the listener and closes the pool when the driver owns it. A pool
-// passed to New is left for the caller to close.
+// Close stops both listeners and closes the pool when the driver owns it. A
+// pool passed to New is left for the caller to close.
 func (s *Store) Close(_ context.Context) error {
 	s.listener.close()
+	s.changes.close()
 	if s.ownsPool {
 		s.pool.Close()
 	}
@@ -248,6 +260,7 @@ type querier interface {
 var (
 	_ driver.Store              = (*Store)(nil)
 	_ driver.Notifier           = (*Store)(nil)
+	_ driver.ChangeNotifier     = (*Store)(nil)
 	_ driver.LeaderElector      = (*Store)(nil)
 	_ driver.LeaseElector       = (*Store)(nil)
 	_ driver.Migrator           = (*Store)(nil)

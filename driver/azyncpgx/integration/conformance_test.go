@@ -16,3 +16,13 @@ func TestConformance(t *testing.T) {
 		return newHarness(t).core.Store()
 	})
 }
+
+// TestChangeNotifierConformance runs the change-notifier conformance suite
+// against a live PostgreSQL Store, driving the 00011 triggers and the second
+// LISTEN connection end to end.
+func TestChangeNotifierConformance(t *testing.T) {
+	drivertest.RunChangeNotifierConformance(t, func(t *testing.T) driver.Store {
+		t.Helper()
+		return newHarness(t).core.Store()
+	})
+}

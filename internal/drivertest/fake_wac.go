@@ -398,6 +398,7 @@ func (f *Fake) ScheduleOperation(_ context.Context, p driver.ScheduleOperationPa
 		seq:                 f.nextSeq(),
 	}
 	f.bumpStat(driver.SourceWorkflow, p.Kind, statEnqueued, 1, now)
+	f.changeJob(f.jobs[id])
 	if state == driver.StatePending {
 		f.wake(driver.SourceWorkflow, p.Kind)
 	}
@@ -422,6 +423,7 @@ func (f *Fake) MarkUncertain(_ context.Context, operationJobID, leaseToken uuid.
 	j.LeaseUntil = time.Time{}
 	j.LastError = reason
 	j.FailedAt = now
+	f.changeJob(j)
 	e := f.executions[j.RunID]
 	if e != nil && !e.terminal() {
 		e.State = driver.WorkflowSuspended
@@ -463,6 +465,7 @@ func (f *Fake) ResolveUncertain(_ context.Context, operationJobID uuid.UUID, dec
 	default:
 		return uuid.Nil, "", fmt.Errorf("drivertest: unknown uncertain decision %q", decision)
 	}
+	f.changeJob(j)
 	e.State = driver.WorkflowRunning
 	e.FailureReason = ""
 	e.UpdatedAt = now
@@ -508,6 +511,7 @@ func (f *Fake) scheduleTaskLocked(workflowID uuid.UUID, kind string, runAt time.
 		seq: f.nextSeq(),
 	}
 	f.bumpStat(driver.SourceWorkflow, kind, statEnqueued, 1, now)
+	f.changeJob(f.jobs[id])
 	if state == driver.StatePending {
 		f.wake(driver.SourceWorkflow, kind)
 	}

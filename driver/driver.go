@@ -278,6 +278,75 @@ type Wake struct {
 	Kind   string
 }
 
+// ChangeNotifier is the optional row-change push capability: a stream of
+// [Change] hints describing state transitions of jobs, DAGs and ledger
+// events, for external observers (ops UIs, SSE bridges) that would otherwise
+// poll. Hints are best-effort and at-most-once — they may be dropped under
+// backpressure or lost across a backend reconnect, and every gap is announced
+// in-band as a [ChangeReset] change. A consumer treats hints as invalidation
+// signals and refetches authoritative state through the Manager surfaces; it
+// must never treat the stream as a durable feed.
+type ChangeNotifier interface {
+	// Changes returns a stream of change hints. The channel is closed when ctx
+	// ends or the store closes. The first delivery on every subscription is a
+	// [ChangeReset], sent once the push channel is live: a change committed
+	// after that reset is received is observed, or its loss is announced by a
+	// further reset — so "refetch on the reset" leaves no silent gap. A nil
+	// channel with nil error means the backend cannot push changes
+	// (poll-only).
+	Changes(ctx context.Context) (<-chan Change, error)
+}
+
+// ChangeEntity discriminates which entity a Change describes, or that the
+// stream itself needs attention (ChangeReset).
+type ChangeEntity string
+
+const (
+	// ChangeJob marks a change to a job row (any Source).
+	ChangeJob ChangeEntity = "job"
+	// ChangeDAG marks a change to a DAG header row.
+	ChangeDAG ChangeEntity = "dag"
+	// ChangeEvent marks an append to the event ledger.
+	ChangeEvent ChangeEntity = "event"
+	// ChangeReset signals a possible delivery gap: the stream just became
+	// live, reconnected after a loss, or dropped hints under backpressure.
+	// Consumers must refetch anything they care about. Every subscription
+	// receives one ChangeReset before any other change.
+	ChangeReset ChangeEntity = "reset"
+)
+
+// Change is a best-effort, at-most-once row-change hint. It carries only
+// identifiers, kind/name, state and a timestamp — never payloads, results or
+// metadata, which routinely carry PII; consumers read full rows through the
+// Manager surfaces behind their own authorization.
+type Change struct {
+	// Entity says which table changed, or ChangeReset for a gap signal.
+	Entity ChangeEntity
+	// Source partitions job changes (queue|event|dag|workflow); empty for
+	// dag-header and ledger-event changes.
+	Source Source
+	// ID is the changed job, DAG or event id; zero for bulk and reset hints.
+	ID uuid.UUID
+	// DAGID links a job change to its owning DAG when the row is a task.
+	DAGID uuid.UUID
+	// Kind is the job kind, the event type, or the DAG definition name.
+	Kind string
+	// TaskKey is set on job changes that belong to a DAG.
+	TaskKey string
+	// State is the row's new state. Job and DAG state vocabularies share the
+	// field; ledger events carry none.
+	State string
+	// At is the backend transaction time of the change.
+	At time.Time
+	// Bulk marks a coalesced hint: one statement changed more rows than the
+	// backend's per-statement cap, so per-row hints were replaced by this one
+	// summary. ID/Kind/TaskKey/State are empty; refetch the whole partition
+	// identified by Entity (and Source for jobs).
+	Bulk bool
+	// Count is the number of rows behind a Bulk hint.
+	Count int
+}
+
 // LeaderElector is the optional cluster-wide leadership capability. Cron
 // scheduling requires it; without it, cron is disabled while every other feature
 // keeps working.
