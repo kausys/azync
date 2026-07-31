@@ -1,5 +1,18 @@
 # Changelog
 
+## [0.0.8](https://github.com/kausys/azync/compare/v0.0.7...v0.0.8) (2026-07-31)
+
+
+### Features
+
+* export watch.ErrPollOnly for poll-only detection ([77765c7](https://github.com/kausys/azync/commit/77765c7adcc8c80495d6fadbdd548aaee8ec99ae))
+* near-real-time change notifications (watch + driver.ChangeNotifier) ([3545c71](https://github.com/kausys/azync/commit/3545c71201c9ee0d24aa53bafa0bb08a4cff8b46))
+
+
+### Bug Fixes
+
+* deliver the opening change reset only once the stream is live ([3778760](https://github.com/kausys/azync/commit/377876036f46e92ddcf378217b4010001268ad1b))
+
 ## [0.0.7](https://github.com/kausys/azync/compare/v0.0.6...v0.0.7) (2026-07-28)
 
 
