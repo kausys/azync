@@ -92,7 +92,7 @@ The browser side maps hints to cache invalidations (e.g. TanStack Query's `inval
 
 - `watch.WithBuffer(n)` — per-subscription buffer (default 256) before hints collapse into a reset.
 - The change stream rides its own dedicated LISTEN connection, opened lazily on the first `Watch` — workers that never watch never open it.
-- `azync.PollOnly()` disables push entirely; `Watch` then returns a clear error.
+- `azync.PollOnly()` disables push entirely; `Watch` then returns `watch.ErrPollOnly` (test with `errors.Is`).
 
 ## See also
 

@@ -25,6 +25,7 @@ Requires the optional `driver.ChangeNotifier` capability (azyncpgx: migration 00
 - `Watcher.Watch(ctx, Filter)` — filtered subscription; first delivery is always an `EntityReset`
 - `Filter{Entities, Sources, Kinds, DAGID}` — resets always pass; bulk hints pass the kind/DAG bounds
 - `Change` / `Entity` / `Source` — aliases of the driver types
+- `ErrPollOnly` — Watch's sentinel for a driver that cannot push
 - `WithBuffer`, `WithCoreOptions`
 
 ## Boundaries

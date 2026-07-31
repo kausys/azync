@@ -148,19 +148,25 @@ func (f Filter) matches(c Change) bool {
 	return true
 }
 
+// ErrPollOnly reports that the driver cannot push change notifications (the
+// backend runs poll-only, e.g. azync.PollOnly or a PgBouncer transaction
+// pool). Test with errors.Is and branch: a caller bridging Watch to a live
+// endpoint typically maps it to "stream unavailable" rather than retrying.
+var ErrPollOnly = errors.New("watch: driver is poll-only; change notifications are unavailable")
+
 // Watch subscribes to change hints matching f. The channel is closed when
 // ctx ends or the store closes; the first delivery is always an EntityReset.
 // Hints are best-effort and at-most-once: when the subscription's buffer
 // fills, dropped hints are replaced by one in-band reset, so a slow consumer
 // sees "refetch" instead of a silent gap. A poll-only driver cannot push
-// changes; Watch reports that as an error.
+// changes; Watch reports that as ErrPollOnly.
 func (w *Watcher) Watch(ctx context.Context, f Filter) (<-chan Change, error) {
 	src, err := w.notifier.Changes(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("watch: changes: %w", err)
 	}
 	if src == nil {
-		return nil, errors.New("watch: driver is poll-only; change notifications are unavailable")
+		return nil, ErrPollOnly
 	}
 	out := make(chan Change, w.cfg.buffer)
 	go func() {

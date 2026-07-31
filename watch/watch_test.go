@@ -103,8 +103,7 @@ func TestWatchReportsPollOnlyDriver(t *testing.T) {
 	is.NoError(err)
 
 	_, err = w.Watch(t.Context(), Filter{})
-	is.Error(err)
-	is.Contains(err.Error(), "poll-only")
+	is.ErrorIs(err, ErrPollOnly)
 }
 
 func TestWatchDeliversInitialResetThenChanges(t *testing.T) {
