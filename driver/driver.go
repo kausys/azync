@@ -289,8 +289,11 @@ type Wake struct {
 type ChangeNotifier interface {
 	// Changes returns a stream of change hints. The channel is closed when ctx
 	// ends or the store closes. The first delivery on every subscription is a
-	// [ChangeReset]. A nil channel with nil error means the backend cannot
-	// push changes (poll-only).
+	// [ChangeReset], sent once the push channel is live: a change committed
+	// after that reset is received is observed, or its loss is announced by a
+	// further reset — so "refetch on the reset" leaves no silent gap. A nil
+	// channel with nil error means the backend cannot push changes
+	// (poll-only).
 	Changes(ctx context.Context) (<-chan Change, error)
 }
 

@@ -52,6 +52,20 @@ func subscribeChanges(t *testing.T, notifier driver.ChangeNotifier) <-chan drive
 	return ch
 }
 
+// subscribeLive opens a subscription and waits for its opening reset: the
+// reset marks the stream live, so a change committed after it is observed
+// (or announced by a further reset). Mutating before it races the backend's
+// push-channel establishment — exactly what the contract tells consumers
+// ("refetch on the reset, then trust the stream").
+func subscribeLive(t *testing.T, notifier driver.ChangeNotifier) <-chan driver.Change {
+	t.Helper()
+	ch := subscribeChanges(t, notifier)
+	awaitChange(t, ch, "the opening reset", func(c driver.Change) bool {
+		return c.Entity == driver.ChangeReset
+	})
+	return ch
+}
+
 // awaitChange drains ch until pred matches or the budget expires.
 func awaitChange(t *testing.T, ch <-chan driver.Change, what string, pred func(driver.Change) bool) driver.Change {
 	t.Helper()
@@ -87,7 +101,7 @@ func runChangeJobLifecycle(t *testing.T, store driver.Store, notifier driver.Cha
 	t.Helper()
 	ctx := context.Background()
 	is := require.New(t)
-	ch := subscribeChanges(t, notifier)
+	ch := subscribeLive(t, notifier)
 
 	id := uuid.New()
 	inserted, err := store.Enqueue(ctx, driver.EnqueueParams{
@@ -123,7 +137,7 @@ func runChangeEventAppend(t *testing.T, store driver.Store, notifier driver.Chan
 	t.Helper()
 	ctx := context.Background()
 	is := require.New(t)
-	ch := subscribeChanges(t, notifier)
+	ch := subscribeLive(t, notifier)
 
 	is.NoError(store.RegisterSubscriber(ctx, driver.Subscriber{
 		Name: "chg_sub", EventType: "evt.chg", MaxAttempts: 3,
@@ -156,7 +170,7 @@ func runChangeDAGCreate(t *testing.T, store driver.Store, notifier driver.Change
 	}
 	ctx := context.Background()
 	is := require.New(t)
-	ch := subscribeChanges(t, notifier)
+	ch := subscribeLive(t, notifier)
 
 	dagID := uuid.New()
 	inserted, _, err := ws.CreateDAG(ctx, driver.DAGParams{

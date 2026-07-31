@@ -123,6 +123,50 @@ func TestDeliverOverflowAnnouncesReset(t *testing.T) {
 	is.Equal("after-gap", second.Kind)
 }
 
+// TestSubscribeDefersResetUntilConnected pins the liveness meaning of the
+// opening reset: it must never arrive before the LISTEN is established, or a
+// consumer could refetch and then silently miss changes committed before the
+// stream could observe them.
+func TestSubscribeDefersResetUntilConnected(t *testing.T) {
+	is := require.New(t)
+	l := newListener(nil, "azync_changes", false, slog.New(slog.DiscardHandler),
+		2, func(string) (driver.Change, bool) { return driver.Change{}, false }, resetChange)
+	// Pretend the listen loop already runs, so subscribe does not start one
+	// against the nil pool.
+	l.mu.Lock()
+	l.started = true
+	l.mu.Unlock()
+
+	ctx := t.Context()
+	ch, err := l.subscribe(ctx)
+	is.NoError(err)
+	select {
+	case <-ch:
+		t.Fatal("no reset may arrive before the stream is live")
+	default:
+	}
+
+	l.markConnectedAndReset()
+	is.Equal(driver.ChangeReset, (<-ch).Entity, "the connect broadcast delivers the deferred opening reset")
+
+	// A subscription made while connected opens with an immediate reset.
+	ch2, err := l.subscribe(ctx)
+	is.NoError(err)
+	is.Equal(driver.ChangeReset, (<-ch2).Entity)
+
+	// After a disconnect, new subscriptions defer again until the reconnect.
+	l.markDisconnected()
+	ch3, err := l.subscribe(ctx)
+	is.NoError(err)
+	select {
+	case <-ch3:
+		t.Fatal("no reset may arrive while disconnected")
+	default:
+	}
+	l.markConnectedAndReset()
+	is.Equal(driver.ChangeReset, (<-ch3).Entity)
+}
+
 // TestDeliverWithoutResetKeepsPlainDrop pins the wakeup contract: a listener
 // with no reset func drops on overflow and never injects anything.
 func TestDeliverWithoutResetKeepsPlainDrop(t *testing.T) {

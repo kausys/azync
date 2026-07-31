@@ -53,10 +53,16 @@ type listener[T any] struct {
 	mu          sync.Mutex
 	subscribers []*subscriber[T]
 	started     bool
-	closed      bool
-	lifeCancel  context.CancelFunc
-	done        chan struct{}
-	wg          sync.WaitGroup
+	// connected reports a live LISTEN. It gates the reset a new subscription
+	// opens with: delivered immediately only when the stream can already
+	// observe changes, deferred to the connection-established broadcast
+	// otherwise — so "reset received" always means "refetch now; a change
+	// committed after this point is observed or announced by a further reset".
+	connected  bool
+	closed     bool
+	lifeCancel context.CancelFunc
+	done       chan struct{}
+	wg         sync.WaitGroup
 }
 
 // subscriber is one live subscription: its channel plus the overflow flag
@@ -102,10 +108,13 @@ func (l *listener[T]) subscribe(ctx context.Context) (<-chan T, error) {
 	}
 	l.ensureStartedLocked()
 	sub := &subscriber[T]{ch: make(chan T, l.buffer)}
-	if l.reset != nil {
-		// A fresh subscription's first delivery is a reset: LISTEN may not
-		// even be established yet, so "refetch first" is the honest opening.
-		// The channel is freshly made with a positive buffer; never blocks.
+	if l.reset != nil && l.connected {
+		// The stream is already live, so the opening reset can go out now:
+		// refetching on it misses nothing. On a not-yet-connected listener
+		// the reset is deferred to the connection-established broadcast —
+		// sending it earlier would invite a refetch whose follow-up changes
+		// LISTEN cannot observe yet. The channel is freshly made with a
+		// positive buffer; never blocks.
 		sub.ch <- l.reset()
 	}
 	l.subscribers = append(l.subscribers, sub)
@@ -150,9 +159,12 @@ func (l *listener[T]) listenLoop(ctx context.Context) {
 			backoff = listenBackoffMin
 			// Every successful LISTEN — the first and every reconnect —
 			// broadcasts a reset: notifications sent while the connection was
-			// down are lost, and this is the only honest signal.
-			l.broadcastReset()
+			// down are lost, and this is the only honest signal. It also
+			// delivers the opening reset to subscriptions made before the
+			// stream went live (see subscribe).
+			l.markConnectedAndReset()
 		})
+		l.markDisconnected()
 		if ctx.Err() != nil {
 			return
 		}
@@ -218,13 +230,28 @@ func (l *listener[T]) broadcast(v T) {
 	}
 }
 
-// broadcastReset broadcasts one reset to every subscriber, on listeners that
-// carry a reset.
-func (l *listener[T]) broadcastReset() {
+// markConnectedAndReset records the live LISTEN and broadcasts one reset to
+// every subscriber, on listeners that carry a reset. One critical section, so
+// no subscription can slip between the flag and the broadcast and miss both
+// paths that deliver its opening reset.
+func (l *listener[T]) markConnectedAndReset() {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	l.connected = true
 	if l.reset == nil {
 		return
 	}
-	l.broadcast(l.reset())
+	for _, sub := range l.subscribers {
+		l.deliverLocked(sub, l.reset())
+	}
+}
+
+// markDisconnected records that the LISTEN connection is gone, so new
+// subscriptions defer their opening reset to the next reconnect broadcast.
+func (l *listener[T]) markDisconnected() {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	l.connected = false
 }
 
 // deliverLocked sends without blocking. Without a reset func a full buffer
