@@ -89,8 +89,9 @@ func assertNoPersistenceDependency(t *testing.T, filePath, importPath string) {
 	}
 }
 
-// assertRuntimeIsolation forbids the queue, event and workflow runtimes from
-// importing one another; they compose only through the shared core.
+// assertRuntimeIsolation forbids the queue, event, dag, workflow and watch
+// packages from importing one another; they compose only through the shared
+// core.
 func assertRuntimeIsolation(t *testing.T, filePath, importPath string) {
 	t.Helper()
 	runtimes := []struct{ dir, pkg string }{
@@ -98,6 +99,7 @@ func assertRuntimeIsolation(t *testing.T, filePath, importPath string) {
 		{"event/", "github.com/kausys/azync/event"},
 		{"dag/", "github.com/kausys/azync/dag"},
 		{"workflow/", "github.com/kausys/azync/workflow"},
+		{"watch/", "github.com/kausys/azync/watch"},
 	}
 	for _, self := range runtimes {
 		if !strings.HasPrefix(filePath, self.dir) {

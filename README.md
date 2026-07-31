@@ -13,8 +13,9 @@ Durable background work for Go over one job table and a pluggable `driver.Store`
 | [`event`](event/) | `event` | CQRS ledger + fan-out deliveries + Replay | [event.md](event.md) | [README](event/README.md) |
 | [`dag`](dag/) | `dag` | Static declared graph (no replay) | [dag.md](dag.md) | [README](dag/README.md) |
 | [`workflow`](workflow/) | `workflow` | Workflow-as-code (Go + history replay) | [workflow.md](workflow.md) | [README](workflow/README.md) |
+| [`watch`](watch/) | — | Change-hint observer (runs no jobs) | [watch.md](watch.md) | [README](watch/README.md) |
 
-All four compose over one `azync.Core` and never import each other.
+All four runtimes compose over one `azync.Core` and never import each other; `watch` observes the same Core under the same isolation rule.
 
 - **Guides** (`queue.md`, …) — how to use the runtime in an application.
 - **Package notes** (`queue/README.md`, …) — technical layout, driver surface, boundaries for maintainers.
@@ -27,6 +28,7 @@ All four compose over one `azync.Core` and never import each other.
 - **Driver contract.** Implement `driver.Store` (+ optional capabilities); validate with the conformance suite.
 - **Lease fencing + reaper.** At-least-once delivery with real fencing tokens.
 - **Two orchestration styles.** Declared graphs ([dag.md](dag.md)) or ordinary Go with deterministic replay ([workflow.md](workflow.md)).
+- **Change hints for ops UIs.** Row-change notifications over LISTEN/NOTIFY ([watch.md](watch.md)) — no polling, no reload.
 
 ## Install
 
@@ -68,6 +70,7 @@ wf, _ := workflow.New(core) // needs driver.WorkflowStore
 | [event.md](event.md) | [`examples/event-basic`](https://github.com/kausys/azync/tree/main/examples/event-basic) |
 | [dag.md](dag.md) | [`examples/dag-basic`](https://github.com/kausys/azync/tree/main/examples/dag-basic) |
 | [workflow.md](workflow.md) | [`examples/workflow-kyc`](https://github.com/kausys/azync/tree/main/examples/workflow-kyc) |
+| [watch.md](watch.md) | [`examples/watch-sse`](https://github.com/kausys/azync/tree/main/examples/watch-sse) |
 
 ## Roadmap
 

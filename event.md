@@ -129,4 +129,4 @@ There is no pause/purge/delete surface like queue’s Manager.
 
 ## See also
 
-[queue.md](queue.md) · [dag.md](dag.md) · [workflow.md](workflow.md) · [README](README.md)
+[queue.md](queue.md) · [dag.md](dag.md) · [workflow.md](workflow.md) · [watch.md](watch.md) · [README](README.md)

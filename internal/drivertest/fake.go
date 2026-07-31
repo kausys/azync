@@ -3,10 +3,11 @@
 // budget resolution, lease-token fencing, reap-to-dead, idempotency dedupe and
 // atomic publish fan-out — so runtime logic can be tested without a database.
 //
-// It also implements the optional [driver.Notifier] and [driver.LeaderElector]
-// capabilities so wake-driven fetch loops and leader-elected cron can be
-// exercised in memory. It deliberately does not implement [driver.TxStore]: the
-// fake has no transactions.
+// It also implements the optional [driver.Notifier], [driver.LeaderElector]
+// and [driver.ChangeNotifier] capabilities so wake-driven fetch loops,
+// leader-elected cron and change-hint streams can be exercised in memory. It
+// deliberately does not implement [driver.TxStore]: the fake has no
+// transactions.
 package drivertest
 
 import (
@@ -49,6 +50,9 @@ type Fake struct {
 
 	wakeMu sync.Mutex
 	wakers []chan driver.Wake
+
+	changeMu   sync.Mutex
+	changeSubs []*changeSub
 }
 
 // NewFake returns an empty Fake backed by the system clock.
@@ -258,6 +262,7 @@ func (f *Fake) enqueueLocked(p driver.EnqueueParams) (bool, error) {
 		seq:                 f.nextSeq(),
 	}
 	f.bumpStat(driver.SourceQueue, p.Kind, statEnqueued, 1, now)
+	f.changeJob(f.jobs[p.ID])
 	if state == driver.StatePending {
 		f.wake(driver.SourceQueue, p.Kind)
 	}
@@ -283,6 +288,7 @@ func (f *Fake) publishLocked(p driver.PublishParams) (int, error) {
 		Payload:       clonePayload(p.Payload),
 		Meta:          cloneMeta(p.Meta),
 	}
+	f.changeEvent(p.ID, p.Type)
 	delivered := 0
 	for _, sub := range f.subscribersFor(p.Type) {
 		f.createDelivery(p.ID, sub.Name, sub.MaxAttempts, false, now)
@@ -314,6 +320,7 @@ func (f *Fake) createDelivery(eventID uuid.UUID, subscriber string, maxAttempts 
 		seq:                 f.nextSeq(),
 	}
 	f.bumpStat(driver.SourceEvent, subscriber, statEnqueued, 1, now)
+	f.changeJob(f.jobs[id])
 	f.wake(driver.SourceEvent, subscriber)
 }
 
@@ -341,6 +348,7 @@ func (f *Fake) SeedOrphanDelivery(deliveryID uuid.UUID, subscriber string) {
 		seq:                 f.nextSeq(),
 	}
 	f.bumpStat(driver.SourceEvent, subscriber, statEnqueued, 1, now)
+	f.changeJob(f.jobs[deliveryID])
 	f.wake(driver.SourceEvent, subscriber)
 }
 
@@ -437,6 +445,7 @@ func (f *Fake) DequeueBatch(_ context.Context, source driver.Source, p driver.De
 		// StartedAt moves with Attempt: each lease begins a new attempt, so
 		// the stamp always describes the attempt State and CompletedAt reflect.
 		j.StartedAt = now
+		f.changeJob(j)
 
 		leased := j.toJob()
 		if source == driver.SourceEvent {
@@ -468,6 +477,7 @@ func (f *Fake) Ack(_ context.Context, id, leaseToken uuid.UUID) error {
 	j.LeaseUntil = time.Time{}
 	j.CompletedAt = now
 	f.bumpStat(j.Source, j.Kind, statProcessed, 1, now)
+	f.changeJob(j)
 	return nil
 }
 
@@ -488,6 +498,7 @@ func (f *Fake) Reschedule(_ context.Context, id, leaseToken uuid.UUID, delay tim
 	j.FailedAt = now
 	f.recordAttempt(j.ID, j.Attempt, lastError, now)
 	f.bumpStat(j.Source, j.Kind, statFailed, 1, now)
+	f.changeJob(j)
 	return nil
 }
 
@@ -507,6 +518,7 @@ func (f *Fake) Dead(_ context.Context, id, leaseToken uuid.UUID, lastError strin
 	j.FailedAt = now
 	f.recordAttempt(j.ID, j.Attempt, lastError, now)
 	f.bumpStat(j.Source, j.Kind, statFailed, 1, now)
+	f.changeJob(j)
 	return nil
 }
 
@@ -526,6 +538,7 @@ func (f *Fake) Skip(_ context.Context, id, leaseToken uuid.UUID, reason string) 
 	j.LastError = reason
 	j.CompletedAt = now
 	f.bumpStat(j.Source, j.Kind, statProcessed, 1, now)
+	f.changeJob(j)
 	return nil
 }
 
@@ -544,6 +557,7 @@ func (f *Fake) Release(_ context.Context, id, leaseToken uuid.UUID) error {
 	j.LeaseToken = uuid.Nil
 	j.LeaseUntil = time.Time{}
 	j.RunAt = now
+	f.changeJob(j)
 	f.wake(j.Source, j.Kind)
 	return nil
 }
@@ -570,6 +584,7 @@ func (f *Fake) Snooze(_ context.Context, id, leaseToken uuid.UUID, delay time.Du
 		j.FailedAt = now
 		f.recordAttempt(j.ID, j.Attempt, deadlineError, now)
 		f.bumpStat(j.Source, j.Kind, statFailed, 1, now)
+		f.changeJob(j)
 		return true, nil
 	}
 	if j.DeadlineAt.IsZero() && j.SnoozeBudget > 0 {
@@ -580,6 +595,7 @@ func (f *Fake) Snooze(_ context.Context, id, leaseToken uuid.UUID, delay time.Du
 	j.Attempt = max(j.Attempt-1, 0)
 	j.LeaseToken = uuid.Nil
 	j.LeaseUntil = time.Time{}
+	f.changeJob(j)
 	return false, nil
 }
 
@@ -611,6 +627,7 @@ func (f *Fake) PromoteDue(_ context.Context, source driver.Source, kinds []strin
 		if j.Source == source && want[j.Kind] && j.State == driver.StateScheduled && !j.RunAt.After(now) {
 			j.State = driver.StatePending
 			promoted++
+			f.changeJob(j)
 			f.wake(source, j.Kind)
 		}
 	}
@@ -647,6 +664,7 @@ func (f *Fake) ReapExpired(_ context.Context, source driver.Source, kinds []stri
 			j.State = driver.StatePending
 			f.wake(source, j.Kind)
 		}
+		f.changeJob(j)
 	}
 	for kind, n := range perKind {
 		f.bumpStat(source, kind, statReaped, n, now)
@@ -927,6 +945,7 @@ func (f *Fake) resetToPending(j *fakeJob) {
 	// A retried job waits with a fresh snooze budget: the stamped deadline is
 	// dropped and re-stamps on the next first snooze.
 	j.DeadlineAt = time.Time{}
+	f.changeJob(j)
 	f.wake(j.Source, j.Kind)
 }
 
@@ -940,6 +959,7 @@ func (f *Fake) ArchiveJob(_ context.Context, source driver.Source, id uuid.UUID)
 	}
 	j.State = driver.StateDead
 	j.LeaseUntil = time.Time{}
+	f.changeJob(j)
 	return nil
 }
 
@@ -952,6 +972,7 @@ func (f *Fake) PauseJob(_ context.Context, source driver.Source, id uuid.UUID) e
 		return driver.NewNotFound("pause")
 	}
 	j.State = driver.StatePaused
+	f.changeJob(j)
 	return nil
 }
 
@@ -969,6 +990,7 @@ func (f *Fake) ResumeJob(_ context.Context, source driver.Source, id uuid.UUID) 
 		j.State = driver.StatePending
 		f.wake(j.Source, j.Kind)
 	}
+	f.changeJob(j)
 	return nil
 }
 
@@ -982,6 +1004,7 @@ func (f *Fake) RunNow(_ context.Context, source driver.Source, id uuid.UUID) err
 	}
 	j.State = driver.StatePending
 	j.RunAt = f.now()
+	f.changeJob(j)
 	f.wake(j.Source, j.Kind)
 	return nil
 }

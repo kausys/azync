@@ -157,4 +157,4 @@ promotion, backoff and snooze.
 
 ## See also
 
-[workflow.md](workflow.md) · [queue.md](queue.md) · [event.md](event.md) · [README](README.md)
+[workflow.md](workflow.md) · [queue.md](queue.md) · [event.md](event.md) · [watch.md](watch.md) · [README](README.md)

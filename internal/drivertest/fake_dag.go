@@ -115,6 +115,7 @@ func (f *Fake) CreateDAG(_ context.Context, p driver.DAGParams) (bool, uuid.UUID
 		deps: slices.Clone(p.Deps),
 	}
 	f.dags[p.ID] = w
+	f.changeDAG(w)
 
 	blocked := make(map[string]bool, len(p.Deps))
 	for _, d := range p.Deps {
@@ -169,6 +170,7 @@ func (f *Fake) insertDAGTask(w *fakeDAG, tk driver.DAGTask, hasDeps bool, now ti
 		seq:                 f.nextSeq(),
 	}
 	f.bumpStat(driver.SourceDAG, tk.Kind, statEnqueued, 1, now)
+	f.changeJob(f.jobs[id])
 	if state == driver.StatePending {
 		f.wake(driver.SourceDAG, tk.Kind)
 	}
@@ -218,6 +220,7 @@ func (f *Fake) deliverSignalNowLocked(w *fakeDAG, sig *fakeDAGSignal, now time.T
 			j.State = driver.StateSucceeded
 			j.Result = clonePayload(sig.payload)
 			j.CompletedAt = now
+			f.changeJob(j)
 			delivered++
 		case j.Kind == driver.KindSleep && j.State == driver.StateScheduled:
 			j.RunAt = now
@@ -259,6 +262,7 @@ func (f *Fake) DeliverBufferedSignals(_ context.Context) (int64, error) {
 				j.State = driver.StateSucceeded
 				j.Result = clonePayload(oldest.payload)
 				j.CompletedAt = now
+				f.changeJob(j)
 			} else {
 				j.RunAt = now
 			}
@@ -316,6 +320,7 @@ func (f *Fake) PromoteUnblocked(_ context.Context) (int64, error) {
 			j.RunAt = now
 			f.wake(driver.SourceDAG, j.Kind)
 		}
+		f.changeJob(j)
 		promoted++
 	}
 	return promoted, nil
@@ -388,6 +393,7 @@ func (f *Fake) CompleteDueSleeps(_ context.Context) (int64, error) {
 		}
 		j.State = driver.StateSucceeded
 		j.CompletedAt = now
+		f.changeJob(j)
 		completed++
 	}
 	return completed, nil
@@ -424,6 +430,7 @@ func (f *Fake) ApplyFailurePolicy(_ context.Context) ([]driver.DAGFailure, error
 				w.State = driver.DAGCompensating
 			}
 		}
+		f.changeDAG(w)
 		out = append(out, driver.DAGFailure{DAGID: w.ID, Policy: policy, DeadTasks: deadKeys})
 	}
 	return out, nil
@@ -474,6 +481,7 @@ func (f *Fake) cancelRemainingTasksLocked(w *fakeDAG, now time.Time) {
 			driver.StateWaiting, driver.StatePaused:
 			j.State = driver.StateCancelled
 			j.CompletedAt = now
+			f.changeJob(j)
 		default:
 		}
 	}
@@ -537,6 +545,7 @@ func (f *Fake) insertCompensationsLocked(w *fakeDAG, now time.Time) int {
 			seq:                 f.nextSeq(),
 		}
 		f.bumpStat(driver.SourceDAG, orig.CompensationKind, statEnqueued, 1, now)
+		f.changeJob(f.jobs[id])
 		if state == driver.StatePending {
 			f.wake(driver.SourceDAG, orig.CompensationKind)
 		}
@@ -610,6 +619,7 @@ func (f *Fake) CompleteDAGs(_ context.Context) (int64, error) {
 			}
 			w.CompletedAt = now
 			w.UpdatedAt = now
+			f.changeDAG(w)
 			settled++
 
 		case driver.DAGCompensating:
@@ -639,6 +649,7 @@ func (f *Fake) CompleteDAGs(_ context.Context) (int64, error) {
 				// the rest of the chain.
 				w.State = driver.DAGSuspended
 				w.UpdatedAt = now
+				f.changeDAG(w)
 				settled++
 			case terminal:
 				if w.cancelRequested {
@@ -648,6 +659,7 @@ func (f *Fake) CompleteDAGs(_ context.Context) (int64, error) {
 				}
 				w.CompletedAt = now
 				w.UpdatedAt = now
+				f.changeDAG(w)
 				settled++
 			}
 
@@ -698,6 +710,7 @@ func (f *Fake) AckTaskResult(_ context.Context, id, leaseToken uuid.UUID, result
 	j.LeaseUntil = time.Time{}
 	j.CompletedAt = now
 	f.bumpStat(j.Source, j.Kind, statProcessed, 1, now)
+	f.changeJob(j)
 	return nil
 }
 
@@ -876,6 +889,7 @@ func (f *Fake) RetryDAG(_ context.Context, id uuid.UUID) error {
 			f.wake(j.Source, j.Kind)
 		}
 		j.DeadlineAt = time.Time{}
+		f.changeJob(j)
 	}
 	if w.State == driver.DAGSuspended || w.State == driver.DAGPaused {
 		if hasComps {
@@ -884,6 +898,7 @@ func (f *Fake) RetryDAG(_ context.Context, id uuid.UUID) error {
 			w.State = driver.DAGRunning
 			w.FailureReason = ""
 		}
+		f.changeDAG(w)
 	}
 	w.UpdatedAt = now
 	return nil
@@ -915,11 +930,13 @@ func (f *Fake) PauseDAG(_ context.Context, id uuid.UUID, reason string) error {
 	for _, j := range f.dagJobsLocked(id) {
 		if j.State == driver.StatePending || j.State == driver.StateScheduled {
 			j.State = driver.StatePaused
+			f.changeJob(j)
 		}
 	}
 	w.State = driver.DAGPaused
 	w.FailureReason = reason
 	w.UpdatedAt = now
+	f.changeDAG(w)
 	return nil
 }
 
@@ -942,6 +959,7 @@ func (f *Fake) CompensateDAG(_ context.Context, id uuid.UUID) error {
 		w.State = driver.DAGCompensating
 	}
 	w.UpdatedAt = now
+	f.changeDAG(w)
 	return nil
 }
 
@@ -965,6 +983,9 @@ func (f *Fake) CancelDAG(_ context.Context, id uuid.UUID) error {
 		w.CompletedAt = now
 	}
 	w.UpdatedAt = now
+	// Unconditional: the SQL trigger also fires on the cancel_requested flip
+	// alone, so an already-compensating DAG still announces the cancel.
+	f.changeDAG(w)
 	return nil
 }
 

@@ -7,9 +7,10 @@
 // are [time.Duration] values that each backend resolves against its own clock,
 // and identifiers are opaque. A driver that implements only [Store] is fully
 // functional through polling; the optional capabilities ([Notifier],
-// [LeaderElector], [Migrator], [TxStore], [DAGStore], [TxDAGStore], [WorkflowStore])
-// unlock push wakeups, leader-elected cron, migrations, transactional
-// enqueues, DAG executions and workflow-as-code respectively.
+// [ChangeNotifier], [LeaderElector], [Migrator], [TxStore], [DAGStore],
+// [TxDAGStore], [WorkflowStore]) unlock push wakeups, row-change hints,
+// leader-elected cron, migrations, transactional enqueues, DAG executions and
+// workflow-as-code respectively.
 package driver
 
 import (
