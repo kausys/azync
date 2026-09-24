@@ -4,7 +4,8 @@
 // LISTEN/NOTIFY, driver.LeaderElector via advisory locks, driver.Migrator via
 // goose migrations, and driver.TxStore[pgx.Tx] for transactional
 // enqueue/publish. Store.SQLTx is the same store with those transactional
-// capabilities taking a database/sql *sql.Tx instead.
+// capabilities taking a database/sql *sql.Tx instead. Outbox captures writes
+// in a database the store does not operate and forwards them to it later.
 //
 // Import it blank to register the "postgres" and "postgresql" DSN schemes with
 // azync.Open:
