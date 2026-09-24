@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.0.11](https://github.com/kausys/azync/compare/v0.0.10...v0.0.11) (2026-09-24)
+
+
+### Bug Fixes
+
+* **azyncpgx:** keep the database/sql adapter a pgx.Rows as pgx grows ([#25](https://github.com/kausys/azync/issues/25)) ([c9b6394](https://github.com/kausys/azync/commit/c9b639435dacfbaa6b4adefb73a8c4de75be1d84))
+
 ## [0.0.10](https://github.com/kausys/azync/compare/v0.0.9...v0.0.10) (2026-09-24)
 
 
