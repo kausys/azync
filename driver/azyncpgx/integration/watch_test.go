@@ -36,6 +36,15 @@ func awaitWatchChange(t *testing.T, ch <-chan watch.Change, what string, pred fu
 	}
 }
 
+// awaitLive consumes a subscription's opening reset. The watch contract
+// guarantees only changes committed after that reset is received — one
+// committed earlier may land before the LISTEN connection is live and be
+// covered by the reset itself — so a test writes only after this returns.
+func awaitLive(t *testing.T, ch <-chan watch.Change) {
+	t.Helper()
+	awaitWatchChange(t, ch, "the opening reset", func(c watch.Change) bool { return c.Entity == watch.EntityReset })
+}
+
 // TestWatchDeliversJobLifecycle drives the full public path — queue producer
 // and worker over live PostgreSQL, 00011 triggers, the dedicated changes
 // LISTEN connection, and the watch package's filtering — and proves one job's
@@ -88,6 +97,7 @@ func TestChangesBulkCoalesces(t *testing.T) {
 	is.NoError(err)
 	ch, err := w.Watch(ctx, watch.Filter{Sources: []watch.Source{driver.SourceQueue}})
 	is.NoError(err)
+	awaitLive(t, ch)
 
 	// One INSERT statement, 60 rows: over the 50-row cap.
 	_, err = pool.Exec(ctx, `
@@ -128,6 +138,7 @@ func TestChangesSchemaIsolation(t *testing.T) {
 	is.NoError(err)
 	ch, err := w.Watch(ctx, watch.Filter{})
 	is.NoError(err)
+	awaitLive(t, ch)
 
 	foreign := uuid.New()
 	_, err = b.core.Store().Enqueue(ctx, driver.EnqueueParams{
