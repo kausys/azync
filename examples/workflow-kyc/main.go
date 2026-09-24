@@ -174,13 +174,13 @@ func run() error {
 // registerHandlers binds the workflow function and its one Operation before
 // the worker starts.
 func registerHandlers(w *workflow.Worker, prov *provider) {
-	workflow.RegisterOperation(w, "check-status", "1", func(_ context.Context, in checkStatusInput) (checkStatusOutput, error) {
+	w.RegisterOperation("check-status", "1", func(_ context.Context, in checkStatusInput) (checkStatusOutput, error) {
 		status := prov.status(in.Ref)
 		slog.Info("checked provider status", "ref", in.Ref, "status", status)
 		return checkStatusOutput{Status: status}, nil
 	})
 
-	workflow.RegisterWorkflow(w, "kyc-onboarding", "1", kycWorkflow)
+	w.RegisterWorkflow("kyc-onboarding", "1", kycWorkflow)
 }
 
 // kycWorkflow is the durable workflow function: Operation check-status →

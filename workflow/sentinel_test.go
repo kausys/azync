@@ -28,14 +28,14 @@ func TestOperationNotReadySnoozesWithoutConsumingAttempt(t *testing.T) {
 	r := newTestRuntime(t, f)
 
 	calls := 0
-	RegisterOperation(r.Worker(), "poll", "1", func(context.Context, struct{}) (string, error) {
+	r.Worker().RegisterOperation("poll", "1", func(context.Context, struct{}) (string, error) {
 		calls++
 		if calls == 1 {
 			return "", dag.NotReady(45 * time.Minute)
 		}
 		return "ready", nil
 	})
-	RegisterWorkflow(r.Worker(), "wf-notready", "1", func(ctx Context, _ struct{}) (string, error) {
+	r.Worker().RegisterWorkflow("wf-notready", "1", func(ctx Context, _ struct{}) (string, error) {
 		var out string
 		if err := ExecuteOperation(ctx, "poll", "1", struct{}{}).Get(&out); err != nil {
 			return "", err
@@ -76,12 +76,12 @@ func TestOperationDagAbortFailsImmediately(t *testing.T) {
 	r := newTestRuntime(t, f, WithDefaultMaxRetries(5))
 
 	calls := 0
-	RegisterOperation(r.Worker(), "doomed", "1", func(context.Context, struct{}) (string, error) {
+	r.Worker().RegisterOperation("doomed", "1", func(context.Context, struct{}) (string, error) {
 		calls++
 		return "", dag.Abort(errors.New("provider rejected: FAIL"))
 	})
 	failed := make(chan error, 1)
-	RegisterWorkflow(r.Worker(), "wf-abort", "1", func(ctx Context, _ struct{}) (string, error) {
+	r.Worker().RegisterWorkflow("wf-abort", "1", func(ctx Context, _ struct{}) (string, error) {
 		var out string
 		if err := ExecuteOperation(ctx, "doomed", "1", struct{}{}).Get(&out); err != nil {
 			failed <- err
@@ -113,10 +113,10 @@ func TestOperationDagSkipCompletesWithNullResult(t *testing.T) {
 	f := drivertest.NewFake()
 	r := newTestRuntime(t, f)
 
-	RegisterOperation(r.Worker(), "maybe", "1", func(context.Context, struct{}) (string, error) {
+	r.Worker().RegisterOperation("maybe", "1", func(context.Context, struct{}) (string, error) {
 		return "", dag.Skip("already VERIFIED")
 	})
-	RegisterWorkflow(r.Worker(), "wf-skip", "1", func(ctx Context, _ struct{}) (string, error) {
+	r.Worker().RegisterWorkflow("wf-skip", "1", func(ctx Context, _ struct{}) (string, error) {
 		var out string
 		if err := ExecuteOperation(ctx, "maybe", "1", struct{}{}).Get(&out); err != nil {
 			return "", err

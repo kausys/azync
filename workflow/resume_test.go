@@ -22,7 +22,7 @@ func TestManagerSuspendThenResumeCompletesExecution(t *testing.T) {
 	f := drivertest.NewFake()
 	r := newTestRuntime(t, f)
 
-	RegisterWorkflow(r.Worker(), "wf-freeze", "1", func(Context, struct{}) (string, error) {
+	r.Worker().RegisterWorkflow("wf-freeze", "1", func(Context, struct{}) (string, error) {
 		return "done", nil
 	})
 
@@ -70,7 +70,7 @@ func TestManagerResumeRequiresSuspended(t *testing.T) {
 	f := drivertest.NewFake()
 	r := newTestRuntime(t, f)
 
-	RegisterWorkflow(r.Worker(), "wf-guard", "1", func(Context, struct{}) (string, error) {
+	r.Worker().RegisterWorkflow("wf-guard", "1", func(Context, struct{}) (string, error) {
 		return "ok", nil
 	})
 	res, err := r.Client().Start(ctx, "wf-guard", "1", nil)
@@ -101,7 +101,7 @@ func TestResumeAfterReplaySuspensionRecovers(t *testing.T) {
 	r := newTestRuntime(t, f, WithWorkerMode(WorkerModeWorkflowOnly))
 
 	calls := 0
-	RegisterWorkflow(r.Worker(), "wf-recover", "1", func(ctx Context, _ struct{}) (string, error) {
+	r.Worker().RegisterWorkflow("wf-recover", "1", func(ctx Context, _ struct{}) (string, error) {
 		calls++
 		return "recovered", nil
 	})

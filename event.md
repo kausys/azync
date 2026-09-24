@@ -29,17 +29,17 @@ type UserSignedUp struct {
 func (UserSignedUp) EventType() string { return "app.user.signed_up" }
 
 // Three independent subscribers for the same event type.
-_ = event.RegisterFunc(ev.Worker(), "welcome-email",
+_ = ev.Worker().RegisterFunc("welcome-email",
     func(ctx context.Context, e UserSignedUp) error {
         log.Printf("welcome %s", e.Email)
         return nil
     })
-_ = event.RegisterFunc(ev.Worker(), "crm-sync",
+_ = ev.Worker().RegisterFunc("crm-sync",
     func(ctx context.Context, e UserSignedUp) error {
         log.Printf("crm upsert %s", e.Email)
         return nil
     })
-_ = event.RegisterFunc(ev.Worker(), "analytics",
+_ = ev.Worker().RegisterFunc("analytics",
     func(ctx context.Context, e UserSignedUp) error {
         log.Printf("track signup %s (replay %t)", e.Email, event.IsReplay(ctx))
         return nil
@@ -56,7 +56,7 @@ go func() {
 id, err := ev.Publisher().Publish(ctx, UserSignedUp{Email: "ada@example.com"})
 ```
 
-Subscriptions are durable and unique per `(subscriber name, event type)`. Prefer `RegisterFunc` for a single-type handler; use `Worker.Register` + `event.On` when one subscriber binds several types.
+Subscriptions are durable and unique per `(subscriber name, event type)`. Prefer `Worker.RegisterFunc` for a single-type handler; use `Worker.Register` + `event.On` when one subscriber binds several types.
 
 **Wait for `Ready()` before the first publish** in the same process, or a brand-new subscription may miss that publish. New subscribers only receive **future** events — backfill with Replay.
 
@@ -89,7 +89,7 @@ Publish inside your own transaction (outbox). Rollback → no ledger row, no del
 ```go
 import "github.com/jackc/pgx/v5"
 
-publisher, err := event.TxPublisher[pgx.Tx](ev)
+publisher, err := ev.TxPublisher[pgx.Tx]()
 if err != nil { /* ... */ }
 
 err = pgx.BeginFunc(ctx, pool, func(tx pgx.Tx) error {
@@ -99,7 +99,7 @@ err = pgx.BeginFunc(ctx, pool, func(tx pgx.Tx) error {
 })
 ```
 
-Same pool rule as queue: `tx` must belong to the store’s pool.
+Same rule as queue: `tx` must be open against the database (and `search_path`) the store uses. For a `*sql.Tx`, build the Core over `store.SQLTx()` and use `ev.TxPublisher[*sql.Tx]()` — see [queue.md](queue.md#over-databasesql).
 
 ## Replay
 

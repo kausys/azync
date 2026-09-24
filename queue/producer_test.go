@@ -182,7 +182,7 @@ func TestTxProducerRequiresTxStoreDriver(t *testing.T) {
 	f := drivertest.NewFake() // implements no TxStore
 	r := newTestRuntime(t, f)
 
-	_, err := TxProducer[struct{}](r)
+	_, err := r.TxProducer[struct{}]()
 	is.Error(err)
 	is.Contains(err.Error(), "does not support transactional enqueues")
 	is.Contains(err.Error(), "struct {}")
@@ -197,7 +197,7 @@ func TestTxProducerEnqueuesThroughTx(t *testing.T) {
 	r, err := New(core, fastOptions()...)
 	is.NoError(err)
 
-	tp, err := TxProducer[struct{}](r)
+	tp, err := r.TxProducer[struct{}]()
 	is.NoError(err)
 
 	res, err := tp.EnqueueTx(context.Background(), struct{}{}, testArgs{Value: "in-tx"}, MaxRetries(3))

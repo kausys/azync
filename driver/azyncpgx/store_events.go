@@ -61,12 +61,19 @@ func (s *Store) Publish(ctx context.Context, p driver.PublishParams) (int, error
 // stays inside the caller's transaction here — that is the outbox contract:
 // a wakeup is only ever sent if the caller's own transaction commits.
 func (s *Store) PublishTx(ctx context.Context, tx pgx.Tx, p driver.PublishParams) (int, error) {
-	kinds, delivered, err := s.publish(ctx, tx, p)
+	return s.publishInTx(ctx, tx, p)
+}
+
+// publishInTx is PublishTx over any querier enlisted in the caller's
+// transaction: the pgx.Tx of PublishTx, or the adapted *sql.Tx of
+// SQLTxStore.PublishTx.
+func (s *Store) publishInTx(ctx context.Context, q querier, p driver.PublishParams) (int, error) {
+	kinds, delivered, err := s.publish(ctx, q, p)
 	if err != nil {
 		return 0, err
 	}
 	for kind := range kinds {
-		if _, err := tx.Exec(ctx, `SELECT pg_notify($1, $2)`, s.notifyChannel, notifyPayload(driver.SourceEvent, kind)); err != nil {
+		if _, err := q.Exec(ctx, `SELECT pg_notify($1, $2)`, s.notifyChannel, notifyPayload(driver.SourceEvent, kind)); err != nil {
 			return 0, fmt.Errorf("azyncpgx: publish notify: %w", err)
 		}
 	}

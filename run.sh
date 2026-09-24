@@ -18,7 +18,7 @@ ALL_MODULES=("$ROOT_MODULE" "${SUB_MODULES[@]}")
 # (.github/workflows/lint.yml, .github/workflows/release.yml) — keep the
 # `version:` input on each golangci-lint-action step in those workflows equal
 # to this value.
-GOLANGCI_LINT_VERSION="v2.12.2"
+GOLANGCI_LINT_VERSION="v2.13.1"
 BIN_DIR="$ROOT_DIR/bin"
 GOLANGCI_LINT="$BIN_DIR/golangci-lint"
 
@@ -42,9 +42,12 @@ EOF
 }
 
 # ensure_golangci_lint installs the pinned golangci-lint into ./bin (gitignored)
-# if it is not already present, rather than relying on a global install.
+# when it is absent or reports another version, rather than relying on a global
+# install. The version check matters: a binary left over from an older pin
+# would otherwise be reused forever, and one built with an older Go cannot
+# load code that needs a newer language version.
 ensure_golangci_lint() {
-	if [[ -x "$GOLANGCI_LINT" ]]; then
+	if [[ -x "$GOLANGCI_LINT" ]] && "$GOLANGCI_LINT" version 2>/dev/null | grep -q "version ${GOLANGCI_LINT_VERSION#v} "; then
 		return
 	fi
 	echo "→ Installing golangci-lint ${GOLANGCI_LINT_VERSION} into ${BIN_DIR}"

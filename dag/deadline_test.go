@@ -30,7 +30,7 @@ func TestNotReadyPastDeadlineDeadLettersAndAppliesPolicy(t *testing.T) {
 	f.Clock = clk
 	r := newTestRuntime(t, f)
 
-	is.NoError(Register(r.Worker(), func(context.Context, pollTask) (None, error) {
+	is.NoError(r.Worker().Register(func(context.Context, pollTask) (None, error) {
 		return None{}, NotReady(time.Millisecond)
 	}))
 
@@ -75,14 +75,14 @@ func TestNotReadyPastDeadlineWithCancelPolicyCompensates(t *testing.T) {
 	r := newTestRuntime(t, f)
 
 	compensated := make(chan struct{})
-	is.NoError(Register(r.Worker(), func(_ context.Context, d sagaDo) (None, error) {
+	is.NoError(r.Worker().Register(func(_ context.Context, d sagaDo) (None, error) {
 		return None{}, nil
 	}))
-	is.NoError(Register(r.Worker(), func(_ context.Context, u sagaUndo) (None, error) {
+	is.NoError(r.Worker().Register(func(_ context.Context, u sagaUndo) (None, error) {
 		close(compensated)
 		return None{}, nil
 	}))
-	is.NoError(Register(r.Worker(), func(context.Context, pollTask) (None, error) {
+	is.NoError(r.Worker().Register(func(context.Context, pollTask) (None, error) {
 		return None{}, NotReady(time.Millisecond)
 	}))
 

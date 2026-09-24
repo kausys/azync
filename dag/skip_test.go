@@ -33,10 +33,10 @@ func TestSkipSettlesTaskAndDownstreamRuns(t *testing.T) {
 	r := newTestRuntime(t, f)
 
 	sawSkipped := make(chan error, 1)
-	is.NoError(Register(r.Worker(), func(context.Context, submitTask) (None, error) {
+	is.NoError(r.Worker().Register(func(context.Context, submitTask) (None, error) {
 		return None{}, Skip("already VERIFIED")
 	}))
-	is.NoError(Register(r.Worker(), func(ctx context.Context, _ actTask) (None, error) {
+	is.NoError(r.Worker().Register(func(ctx context.Context, _ actTask) (None, error) {
 		_, err := ResultOf[string](ctx, "submit")
 		sawSkipped <- err
 		return None{}, nil
@@ -90,10 +90,10 @@ func TestManagerTaskResultReadsOneResult(t *testing.T) {
 	f := drivertest.NewFake()
 	r := newTestRuntime(t, f)
 
-	is.NoError(Register(r.Worker(), func(context.Context, submitTask) (map[string]string, error) {
+	is.NoError(r.Worker().Register(func(context.Context, submitTask) (map[string]string, error) {
 		return map[string]string{"provider_id": "cus_42"}, nil
 	}))
-	is.NoError(Register(r.Worker(), func(context.Context, actTask) (None, error) {
+	is.NoError(r.Worker().Register(func(context.Context, actTask) (None, error) {
 		return None{}, nil
 	}))
 

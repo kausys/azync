@@ -101,7 +101,7 @@ func run() error {
 	if err := ev.Worker().Register(welcomeEmailer{}, event.On(sendWelcome)); err != nil {
 		return fmt.Errorf("register welcome-email: %w", err)
 	}
-	if err := event.RegisterFunc(ev.Worker(), "examples.crm-sync", syncToCRM); err != nil {
+	if err := ev.Worker().RegisterFunc("examples.crm-sync", syncToCRM); err != nil {
 		return fmt.Errorf("register crm-sync: %w", err)
 	}
 

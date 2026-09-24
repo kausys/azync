@@ -30,7 +30,7 @@ func TestWorkerProcessesJobEndToEnd(t *testing.T) {
 		meta    map[string]string
 	}
 	got := make(chan delivery, 1)
-	is.NoError(Register(r.Worker(), func(ctx context.Context, args testArgs) error {
+	is.NoError(r.Worker().Register(func(ctx context.Context, args testArgs) error {
 		got <- delivery{id: JobID(ctx), args: args, attempt: Attempt(ctx), meta: Metadata(ctx)}
 		return nil
 	}))
@@ -62,7 +62,7 @@ func TestFailedJobReschedulesWithBackoff(t *testing.T) {
 	r := newTestRuntime(t, f)
 
 	var runs atomic.Int32
-	is.NoError(Register(r.Worker(), func(context.Context, testArgs) error {
+	is.NoError(r.Worker().Register(func(context.Context, testArgs) error {
 		runs.Add(1)
 		return errors.New("transient")
 	}))
@@ -91,7 +91,7 @@ func TestRetryAfterFixedDelayThenCompletes(t *testing.T) {
 	r := newTestRuntime(t, f, withMaintenanceIntervals(2*time.Millisecond, time.Hour))
 
 	var runs atomic.Int32
-	is.NoError(Register(r.Worker(), func(context.Context, testArgs) error {
+	is.NoError(r.Worker().Register(func(context.Context, testArgs) error {
 		if runs.Add(1) == 1 {
 			return RetryAfter(errors.New("warming up"), 10*time.Millisecond)
 		}
@@ -123,7 +123,7 @@ func TestAbortDeadLettersImmediately(t *testing.T) {
 	r := newTestRuntime(t, f)
 
 	var runs atomic.Int32
-	is.NoError(Register(r.Worker(), func(context.Context, testArgs) error {
+	is.NoError(r.Worker().Register(func(context.Context, testArgs) error {
 		runs.Add(1)
 		return Abort(errors.New("permanent failure"))
 	}))
@@ -148,7 +148,7 @@ func TestReportableDiesWhenBudgetExhausts(t *testing.T) {
 	r := newTestRuntime(t, f, withMaintenanceIntervals(2*time.Millisecond, time.Hour))
 
 	var runs atomic.Int32
-	is.NoError(Register(r.Worker(), func(context.Context, testArgs) error {
+	is.NoError(r.Worker().Register(func(context.Context, testArgs) error {
 		runs.Add(1)
 		return Reportable(errors.New("keeps failing"))
 	}, WithMaxRetries(2)))
@@ -180,7 +180,7 @@ func TestExhaustedBudgetWithFixedDelaysGoesDead(t *testing.T) {
 	r := newTestRuntime(t, f, withMaintenanceIntervals(2*time.Millisecond, time.Hour))
 
 	var runs atomic.Int32
-	is.NoError(Register(r.Worker(), func(context.Context, testArgs) error {
+	is.NoError(r.Worker().Register(func(context.Context, testArgs) error {
 		runs.Add(1)
 		return RetryAfter(errors.New("always fails"), time.Millisecond)
 	}, WithMaxRetries(3)))
@@ -210,7 +210,7 @@ func TestJobTimeoutCancelsHandlerAndReschedules(t *testing.T) {
 	r := newTestRuntime(t, f)
 
 	canceled := make(chan struct{}, 1)
-	is.NoError(Register(r.Worker(), func(ctx context.Context, _ testArgs) error {
+	is.NoError(r.Worker().Register(func(ctx context.Context, _ testArgs) error {
 		<-ctx.Done() // only the per-job timeout can fire here
 		canceled <- struct{}{}
 		return ctx.Err()
@@ -239,7 +239,7 @@ func TestRuntimeDefaultJobTimeoutApplies(t *testing.T) {
 	r := newTestRuntime(t, f, WithDefaultJobTimeout(20*time.Millisecond))
 
 	canceled := make(chan struct{}, 1)
-	is.NoError(Register(r.Worker(), func(ctx context.Context, _ testArgs) error {
+	is.NoError(r.Worker().Register(func(ctx context.Context, _ testArgs) error {
 		<-ctx.Done()
 		canceled <- struct{}{}
 		return ctx.Err()
@@ -265,7 +265,7 @@ func TestPerKindConcurrencyIsRespected(t *testing.T) {
 	const jobs = 6
 	var inflight, maxInflight, processed atomic.Int32
 	allDone := make(chan struct{})
-	is.NoError(Register(r.Worker(), func(context.Context, testArgs) error {
+	is.NoError(r.Worker().Register(func(context.Context, testArgs) error {
 		cur := inflight.Add(1)
 		for {
 			prev := maxInflight.Load()
@@ -303,7 +303,7 @@ func TestShutdownDrainLetsSlowJobFinish(t *testing.T) {
 
 	started := make(chan struct{}, 1)
 	var canceled atomic.Bool
-	is.NoError(Register(r.Worker(), func(ctx context.Context, _ testArgs) error {
+	is.NoError(r.Worker().Register(func(ctx context.Context, _ testArgs) error {
 		started <- struct{}{}
 		select {
 		case <-time.After(100 * time.Millisecond):
@@ -331,7 +331,7 @@ func TestReadyClosesAfterStart(t *testing.T) {
 	t.Parallel()
 	is := require.New(t)
 	r := newTestRuntime(t, drivertest.NewFake())
-	is.NoError(Register(r.Worker(), func(context.Context, testArgs) error { return nil }))
+	is.NoError(r.Worker().Register(func(context.Context, testArgs) error { return nil }))
 
 	select {
 	case <-r.Worker().Ready():
@@ -352,7 +352,7 @@ func TestWakeNudgesIdleWorker(t *testing.T) {
 		WithFetchPollInterval(10*time.Second), WithIdleBackoffMax(10*time.Second))
 
 	done := make(chan struct{}, 1)
-	is.NoError(Register(r.Worker(), func(context.Context, testArgs) error {
+	is.NoError(r.Worker().Register(func(context.Context, testArgs) error {
 		done <- struct{}{}
 		return nil
 	}))
@@ -386,7 +386,7 @@ func TestPollOnlyStoreStillProcessesJobs(t *testing.T) {
 	is.NoError(err)
 
 	done := make(chan struct{}, 1)
-	is.NoError(Register(r.Worker(), func(context.Context, testArgs) error {
+	is.NoError(r.Worker().Register(func(context.Context, testArgs) error {
 		done <- struct{}{}
 		return nil
 	}))

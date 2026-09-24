@@ -26,12 +26,12 @@ func TestShutdownDrainLetsInFlightOperationSettle(t *testing.T) {
 
 	started := make(chan struct{})
 	release := make(chan struct{})
-	RegisterOperation(r.Worker(), "slow", "1", func(context.Context, struct{}) (string, error) {
+	r.Worker().RegisterOperation("slow", "1", func(context.Context, struct{}) (string, error) {
 		close(started)
 		<-release
 		return "done", nil
 	})
-	RegisterWorkflow(r.Worker(), "wf-drain", "1", func(ctx Context, _ struct{}) (string, error) {
+	r.Worker().RegisterWorkflow("wf-drain", "1", func(ctx Context, _ struct{}) (string, error) {
 		var out string
 		if err := ExecuteOperation(ctx, "slow", "1", struct{}{}).Get(&out); err != nil {
 			return "", err
@@ -87,13 +87,13 @@ func TestConcurrencyProcessesOperationsInParallel(t *testing.T) {
 	var wg sync.WaitGroup
 	wg.Add(2)
 	release := make(chan struct{})
-	RegisterOperation(r.Worker(), "par", "1", func(context.Context, struct{}) (string, error) {
+	r.Worker().RegisterOperation("par", "1", func(context.Context, struct{}) (string, error) {
 		wg.Done()
 		wg.Wait() // only unblocks once both passes are running concurrently
 		<-release
 		return "ok", nil
 	})
-	RegisterWorkflow(r.Worker(), "wf-par", "1", func(ctx Context, _ struct{}) (string, error) {
+	r.Worker().RegisterWorkflow("wf-par", "1", func(ctx Context, _ struct{}) (string, error) {
 		var out string
 		if err := ExecuteOperation(ctx, "par", "1", struct{}{}).Get(&out); err != nil {
 			return "", err
@@ -147,12 +147,12 @@ func TestHardDrainTimeoutAbandonsStuckOperation(t *testing.T) {
 
 	started := make(chan struct{})
 	stuck := make(chan struct{})
-	RegisterOperation(r.Worker(), "stuck", "1", func(context.Context, struct{}) (string, error) {
+	r.Worker().RegisterOperation("stuck", "1", func(context.Context, struct{}) (string, error) {
 		close(started)
 		<-stuck // never released within the test: ignores cancellation entirely
 		return "", nil
 	})
-	RegisterWorkflow(r.Worker(), "wf-stuck", "1", func(ctx Context, _ struct{}) (string, error) {
+	r.Worker().RegisterWorkflow("wf-stuck", "1", func(ctx Context, _ struct{}) (string, error) {
 		var out string
 		if err := ExecuteOperation(ctx, "stuck", "1", struct{}{}).Get(&out); err != nil {
 			return "", err

@@ -18,8 +18,8 @@
 // worker process.
 //
 // Compose a Runtime over a shared Core with New, or standalone with Open.
-// Register handlers with Register / RegisterKind before Worker.Start, and
-// periodic jobs with RegisterCron (leader-elected, deduplicated per
+// Register handlers with Worker.Register / Worker.RegisterKind before
+// Worker.Start, and periodic jobs with Worker.RegisterCron (leader-elected, deduplicated per
 // occurrence, no backfill). The Manager exposes the admin surface:
 // inspection, retry, archive, pause/resume, purge and vacuums.
 package queue

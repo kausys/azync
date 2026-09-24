@@ -26,7 +26,7 @@ Requires `driver.DAGStore` (+ Core job store). Tables: `azync_dags`, `azync_dag_
 
 - `Define` / `Task` / `Sleep` / `WaitSignal` / `Compensate` / `OnFailure` / …
 - `Client.Run`, `Client.Signal`
-- `Register`, `ResultOf[T]`, `NotReady`
+- `Worker.Register` / `Worker.RegisterKind`, `ResultOf[T]`, `NotReady`
 - `WithRetention`, `WithIdempotencyKey`
 - `Manager` — inspection (`Tasks` returns each task's `DependsOn`, so the slice
   is the graph), `Stats` / `Definitions` / `TaskCounts` for listings and the

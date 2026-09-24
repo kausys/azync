@@ -152,7 +152,7 @@ func TestTxPublisherRequiresTxStoreDriver(t *testing.T) {
 	is := require.New(t)
 	r := newTestRuntime(t, drivertest.NewFake()) // implements no TxStore
 
-	_, err := TxPublisher[struct{}](r)
+	_, err := r.TxPublisher[struct{}]()
 	is.Error(err)
 	is.Contains(err.Error(), "does not support transactional publishes")
 	is.Contains(err.Error(), "struct {}")
@@ -169,7 +169,7 @@ func TestTxPublisherPublishesThroughTx(t *testing.T) {
 	ctx := context.Background()
 
 	register(t, r, "billing", orderCreated{}.EventType(), 3)
-	tp, err := TxPublisher[struct{}](r)
+	tp, err := r.TxPublisher[struct{}]()
 	is.NoError(err)
 
 	id, err := tp.PublishTx(ctx, struct{}{}, orderCreated{Value: "in-tx"})

@@ -25,7 +25,7 @@ func TestSleepCompletesWhenDue(t *testing.T) {
 	r := newTestRuntime(t, f)
 
 	var gateRuns atomic.Int32
-	is.NoError(Register(r.Worker(), func(context.Context, sleepGate) (None, error) {
+	is.NoError(r.Worker().Register(func(context.Context, sleepGate) (None, error) {
 		gateRuns.Add(1)
 		return None{}, nil
 	}))
@@ -92,7 +92,7 @@ func TestVacuumRemovesTerminalWorkflowsPastRetention(t *testing.T) {
 	r := newTestRuntime(t, f,
 		WithRetention(time.Hour),
 		withSchedulerIntervals(2*time.Millisecond, 5*time.Millisecond))
-	is.NoError(Register(r.Worker(), func(context.Context, sleepGate) (None, error) { return None{}, nil }))
+	is.NoError(r.Worker().Register(func(context.Context, sleepGate) (None, error) { return None{}, nil }))
 
 	res, err := r.Client().Run(context.Background(), Define("vac").Task("t", sleepGate{}))
 	is.NoError(err)
@@ -124,7 +124,7 @@ func TestZeroRetentionKeepsTerminalWorkflowsForever(t *testing.T) {
 	r := newTestRuntime(t, f,
 		WithRetention(0),
 		withSchedulerIntervals(2*time.Millisecond, 5*time.Millisecond))
-	is.NoError(Register(r.Worker(), func(context.Context, sleepGate) (None, error) { return None{}, nil }))
+	is.NoError(r.Worker().Register(func(context.Context, sleepGate) (None, error) { return None{}, nil }))
 
 	res, err := r.Client().Run(context.Background(), Define("keep").Task("t", sleepGate{}))
 	is.NoError(err)

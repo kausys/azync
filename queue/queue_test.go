@@ -157,7 +157,7 @@ func TestCloseWaitsForWorkerDrainOnOwnedCore(t *testing.T) {
 
 	started := make(chan struct{}, 1)
 	release := make(chan struct{})
-	is.NoError(Register(r.Worker(), func(ctx context.Context, _ testArgs) error {
+	is.NoError(r.Worker().Register(func(ctx context.Context, _ testArgs) error {
 		started <- struct{}{}
 		<-release
 		return nil

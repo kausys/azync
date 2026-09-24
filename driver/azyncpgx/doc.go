@@ -3,7 +3,8 @@
 // optional capabilities — driver.Notifier and driver.ChangeNotifier via
 // LISTEN/NOTIFY, driver.LeaderElector via advisory locks, driver.Migrator via
 // goose migrations, and driver.TxStore[pgx.Tx] for transactional
-// enqueue/publish.
+// enqueue/publish. Store.SQLTx is the same store with those transactional
+// capabilities taking a database/sql *sql.Tx instead.
 //
 // Import it blank to register the "postgres" and "postgresql" DSN schemes with
 // azync.Open:

@@ -36,8 +36,8 @@ func TestRegisterDuplicateKindFails(t *testing.T) {
 	is := require.New(t)
 	r := newTestRuntime(t, drivertest.NewFake())
 	handler := func(context.Context, regArgs) (None, error) { return None{}, nil }
-	is.NoError(Register(r.Worker(), handler))
-	err := Register(r.Worker(), handler)
+	is.NoError(r.Worker().Register(handler))
+	err := r.Worker().Register(handler)
 	is.Error(err)
 	is.Contains(err.Error(), `dag: kind "reg.typed" already registered`)
 }
@@ -46,12 +46,12 @@ func TestRegisterAfterStartFails(t *testing.T) {
 	t.Parallel()
 	is := require.New(t)
 	r := newTestRuntime(t, drivertest.NewFake())
-	is.NoError(Register(r.Worker(), func(context.Context, regArgs) (None, error) { return None{}, nil }))
+	is.NoError(r.Worker().Register(func(context.Context, regArgs) (None, error) { return None{}, nil }))
 
 	startWorker(t, r.Worker())
 	awaitReady(t, r.Worker())
 
-	err := RegisterKind(r.Worker(), "late.kind",
+	err := r.Worker().RegisterKind("late.kind",
 		func(context.Context, json.RawMessage) (json.RawMessage, error) { return nil, nil })
 	is.Error(err)
 	is.Contains(err.Error(), "dag: cannot register after start")
@@ -61,7 +61,7 @@ func TestRegisterRejectsReservedKinds(t *testing.T) {
 	t.Parallel()
 	is := require.New(t)
 	r := newTestRuntime(t, drivertest.NewFake())
-	err := RegisterKind(r.Worker(), "$custom",
+	err := r.Worker().RegisterKind("$custom",
 		func(context.Context, json.RawMessage) (json.RawMessage, error) { return nil, nil })
 	is.Error(err)
 	is.Contains(err.Error(), "reserved")
@@ -75,7 +75,7 @@ func TestUndecodablePayloadDeadLettersWithoutHandler(t *testing.T) {
 	r := newTestRuntime(t, f)
 
 	var handlerRuns atomic.Int32
-	is.NoError(Register(r.Worker(), func(context.Context, regDecode) (None, error) {
+	is.NoError(r.Worker().Register(func(context.Context, regDecode) (None, error) {
 		handlerRuns.Add(1)
 		return None{}, nil
 	}))
@@ -115,7 +115,7 @@ func TestRegisterKindPersistsRawResultAndExposesContext(t *testing.T) {
 		payload json.RawMessage
 	}
 	got := make(chan seen, 1)
-	is.NoError(RegisterKind(r.Worker(), "reg.raw",
+	is.NoError(r.Worker().RegisterKind("reg.raw",
 		func(ctx context.Context, payload json.RawMessage) (json.RawMessage, error) {
 			got <- seen{id: ID(ctx), key: TaskKey(ctx), payload: payload}
 			return json.RawMessage(`{"ok":true}`), nil
@@ -158,7 +158,7 @@ func TestReportableDiesWhenBudgetExhausts(t *testing.T) {
 	r := newTestRuntime(t, f)
 
 	var runs atomic.Int32
-	is.NoError(Register(r.Worker(), func(context.Context, regArgs) (None, error) {
+	is.NoError(r.Worker().Register(func(context.Context, regArgs) (None, error) {
 		runs.Add(1)
 		return None{}, Reportable(errors.New("keeps failing"))
 	}, WithMaxRetries(2)))
@@ -186,7 +186,7 @@ func TestNoneResultPersistsNothing(t *testing.T) {
 	f := drivertest.NewFake()
 	r := newTestRuntime(t, f)
 
-	is.NoError(Register(r.Worker(), func(context.Context, regNone) (None, error) { return None{}, nil }))
+	is.NoError(r.Worker().Register(func(context.Context, regNone) (None, error) { return None{}, nil }))
 
 	res, err := r.Client().Run(context.Background(), Define("none").Task("t", regNone{}))
 	is.NoError(err)

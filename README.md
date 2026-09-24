@@ -37,7 +37,7 @@ go get github.com/kausys/azync@latest
 go get github.com/kausys/azync/driver/azyncpgx@latest
 ```
 
-Go 1.26+, PostgreSQL 13+.
+Go 1.27+, PostgreSQL 13+.
 
 ```go
 import (

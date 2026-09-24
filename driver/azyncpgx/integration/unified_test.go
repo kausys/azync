@@ -7,7 +7,6 @@ import (
 
 	"github.com/kausys/azync"
 	"github.com/kausys/azync/event"
-	"github.com/kausys/azync/queue"
 
 	"github.com/stretchr/testify/require"
 )
@@ -23,13 +22,13 @@ func TestUnifiedQueueAndEventCoexist(t *testing.T) {
 	ctx := context.Background()
 
 	jobDone := make(chan struct{}, 1)
-	is.NoError(queue.Register(q.Worker(), func(context.Context, itJob) error {
+	is.NoError(q.Worker().Register(func(context.Context, itJob) error {
 		jobDone <- struct{}{}
 		return nil
 	}))
 	is.NoError(e.Publisher().Register(ctx, event.Subscription{Name: "sink", EventType: orderEvent{}.EventType(), MaxAttempts: 3}))
 	evDone := make(chan struct{}, 1)
-	is.NoError(event.RegisterFunc(e.Worker(), "sink", func(context.Context, orderEvent) error {
+	is.NoError(e.Worker().RegisterFunc("sink", func(context.Context, orderEvent) error {
 		evDone <- struct{}{}
 		return nil
 	}))
@@ -102,7 +101,7 @@ func TestUnifiedListenWakeDeliversPromptly(t *testing.T) {
 	ctx := context.Background()
 
 	done := make(chan struct{}, 1)
-	is.NoError(queue.Register(q.Worker(), func(context.Context, itJob) error {
+	is.NoError(q.Worker().Register(func(context.Context, itJob) error {
 		done <- struct{}{}
 		return nil
 	}))
@@ -137,7 +136,7 @@ func TestUnifiedPollOnlyDelivers(t *testing.T) {
 	ctx := context.Background()
 
 	done := make(chan struct{}, 1)
-	is.NoError(queue.Register(q.Worker(), func(context.Context, itJob) error {
+	is.NoError(q.Worker().Register(func(context.Context, itJob) error {
 		done <- struct{}{}
 		return nil
 	}))

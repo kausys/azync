@@ -7,7 +7,6 @@ import (
 
 	"github.com/kausys/azync"
 	"github.com/kausys/azync/event"
-	"github.com/kausys/azync/queue"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/stretchr/testify/require"
@@ -23,7 +22,7 @@ func TestTxProducerRollbackAndCommit(t *testing.T) {
 	ctx := context.Background()
 	pool := newPool(t, h.base, h.schema)
 
-	txp, err := queue.TxProducer[pgx.Tx](q)
+	txp, err := q.TxProducer[pgx.Tx]()
 	is.NoError(err)
 
 	// Rollback: the enqueue never lands.
@@ -42,7 +41,7 @@ func TestTxProducerRollbackAndCommit(t *testing.T) {
 	// Commit: the job lands and its after-commit NOTIFY wakes the worker under a
 	// 10s poll interval, so prompt delivery can only be the NOTIFY.
 	done := make(chan struct{}, 1)
-	is.NoError(queue.Register(q.Worker(), func(context.Context, itJob) error {
+	is.NoError(q.Worker().Register(func(context.Context, itJob) error {
 		done <- struct{}{}
 		return nil
 	}))
@@ -82,7 +81,7 @@ func TestTxPublisherRollbackAndCommit(t *testing.T) {
 
 	is.NoError(e.Publisher().Register(ctx, event.Subscription{Name: "sink", EventType: orderEvent{}.EventType(), MaxAttempts: 3}))
 
-	txp, err := event.TxPublisher[pgx.Tx](e)
+	txp, err := e.TxPublisher[pgx.Tx]()
 	is.NoError(err)
 
 	// Rollback: neither the event nor any delivery survives.
@@ -101,7 +100,7 @@ func TestTxPublisherRollbackAndCommit(t *testing.T) {
 
 	// Commit: the event and its delivery land, and the NOTIFY wakes the worker.
 	done := make(chan struct{}, 1)
-	is.NoError(event.RegisterFunc(e.Worker(), "sink", func(context.Context, orderEvent) error {
+	is.NoError(e.Worker().RegisterFunc("sink", func(context.Context, orderEvent) error {
 		done <- struct{}{}
 		return nil
 	}))

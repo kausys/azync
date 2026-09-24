@@ -81,7 +81,7 @@ func TestSuspendPolicyParksAndManagerRetryResumes(t *testing.T) {
 	r := newTestRuntime(t, f)
 
 	var runs atomic.Int32
-	is.NoError(Register(r.Worker(), func(context.Context, mgrFlaky) (None, error) {
+	is.NoError(r.Worker().Register(func(context.Context, mgrFlaky) (None, error) {
 		if runs.Add(1) == 1 {
 			return None{}, Abort(testError("first run aborts"))
 		}
@@ -113,8 +113,8 @@ func TestManagerCompensateUnwindsARunningWorkflow(t *testing.T) {
 	r := newTestRuntime(t, f)
 
 	var undone atomic.Int32
-	is.NoError(Register(r.Worker(), func(context.Context, sagaDo) (None, error) { return None{}, nil }))
-	is.NoError(Register(r.Worker(), func(context.Context, sagaUndo) (None, error) {
+	is.NoError(r.Worker().Register(func(context.Context, sagaDo) (None, error) { return None{}, nil }))
+	is.NoError(r.Worker().Register(func(context.Context, sagaUndo) (None, error) {
 		undone.Add(1)
 		return None{}, nil
 	}))
@@ -147,7 +147,7 @@ func TestManagerCancelStopsARunningWorkflow(t *testing.T) {
 	f := drivertest.NewFake()
 	r := newTestRuntime(t, f)
 
-	is.NoError(Register(r.Worker(), func(context.Context, sagaDo) (None, error) { return None{}, nil }))
+	is.NoError(r.Worker().Register(func(context.Context, sagaDo) (None, error) { return None{}, nil }))
 
 	res, err := r.Client().Run(context.Background(),
 		Define("mgr-cancel").

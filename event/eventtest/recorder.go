@@ -75,7 +75,7 @@ func (r *Recorder) RequireLen(t *testing.T, n int) {
 }
 
 // Of returns every captured event whose args are of type T, in publish order.
-func Of[T event.EventArgs](r *Recorder) []T {
+func (r *Recorder) Of[T event.EventArgs]() []T {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	var out []T
@@ -88,17 +88,17 @@ func Of[T event.EventArgs](r *Recorder) []T {
 }
 
 // RequireOne asserts exactly one event of type T was published and returns it.
-func RequireOne[T event.EventArgs](t *testing.T, r *Recorder) T {
+func (r *Recorder) RequireOne[T event.EventArgs](t *testing.T) T {
 	t.Helper()
-	got := Of[T](r)
+	got := r.Of[T]()
 	var zero T
 	require.Len(t, got, 1, "expected exactly one %T publish", zero)
 	return got[0]
 }
 
 // RequireNone asserts no event of type T was published.
-func RequireNone[T event.EventArgs](t *testing.T, r *Recorder) {
+func (r *Recorder) RequireNone[T event.EventArgs](t *testing.T) {
 	t.Helper()
 	var zero T
-	require.Empty(t, Of[T](r), "expected no %T publish", zero)
+	require.Empty(t, r.Of[T](), "expected no %T publish", zero)
 }

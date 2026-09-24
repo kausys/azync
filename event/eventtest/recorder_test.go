@@ -36,7 +36,7 @@ func TestRecorderCapturesAndFiltersByType(t *testing.T) {
 	rec.RequireLen(t, 3)
 	is.Equal(3, rec.Len())
 
-	created := Of[orderCreated](rec)
+	created := rec.Of[orderCreated]()
 	is.Len(created, 2)
 	is.Equal("a", created[0].Value)
 	is.Equal("b", created[1].Value)
@@ -55,9 +55,9 @@ func TestRecorderRequireOneAndNone(t *testing.T) {
 	_, err := rec.Publish(context.Background(), orderCreated{Value: "only"})
 	is.NoError(err)
 
-	got := RequireOne[orderCreated](t, rec)
+	got := rec.RequireOne[orderCreated](t)
 	is.Equal("only", got.Value)
-	RequireNone[orderCancelled](t, rec)
+	rec.RequireNone[orderCancelled](t)
 }
 
 func TestRecorderReset(t *testing.T) {
@@ -72,7 +72,7 @@ func TestRecorderReset(t *testing.T) {
 	rec.Reset()
 	is.Zero(rec.Len())
 	is.Empty(rec.All())
-	RequireNone[orderCreated](t, rec)
+	rec.RequireNone[orderCreated](t)
 }
 
 func TestRecorderIsConcurrencySafe(t *testing.T) {

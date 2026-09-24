@@ -68,12 +68,12 @@ func TestRegisterFuncAfterStartFails(t *testing.T) {
 	t.Parallel()
 	is := require.New(t)
 	r := newTestRuntime(t, drivertest.NewFake())
-	is.NoError(RegisterFunc(r.Worker(), "billing", func(context.Context, orderCreated) error { return nil }))
+	is.NoError(r.Worker().RegisterFunc("billing", func(context.Context, orderCreated) error { return nil }))
 
 	startWorker(t, r.Worker())
 	awaitReady(t, r.Worker())
 
-	err := RegisterFunc(r.Worker(), "notify", func(context.Context, orderCreated) error { return nil })
+	err := r.Worker().RegisterFunc("notify", func(context.Context, orderCreated) error { return nil })
 	is.Error(err)
 	is.Contains(err.Error(), "cannot register after Start")
 }
