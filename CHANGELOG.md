@@ -1,5 +1,22 @@
 # Changelog
 
+## [0.0.9](https://github.com/kausys/azync/compare/v0.0.8...v0.0.9) (2026-09-24)
+
+
+### ⚠ BREAKING CHANGES
+
+* generic methods on Go 1.27, database/sql transactions in azyncpgx ([#16](https://github.com/kausys/azync/issues/16))
+
+### Features
+
+* generic methods on Go 1.27, database/sql transactions in azyncpgx ([#16](https://github.com/kausys/azync/issues/16)) ([a40258f](https://github.com/kausys/azync/commit/a40258f8e4e8a98e7f731672c95069555f7a9eb2))
+
+
+### Miscellaneous
+
+* pin this cycle to 0.0.9 and require merge commits ([0c93d3f](https://github.com/kausys/azync/commit/0c93d3f98395b21cc13137db83b5173da51d178c))
+* pin this cycle to 0.0.9 and require merge commits ([7637bf2](https://github.com/kausys/azync/commit/7637bf20fa514b19b6c01bfda0ecdc0b5f0e95b5))
+
 ## [0.0.8](https://github.com/kausys/azync/compare/v0.0.7...v0.0.8) (2026-07-31)
 
 
