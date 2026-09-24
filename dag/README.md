@@ -26,6 +26,7 @@ Requires `driver.DAGStore` (+ Core job store). Tables: `azync_dags`, `azync_dag_
 
 - `Define` / `Task` / `Sleep` / `WaitSignal` / `Compensate` / `OnFailure` / …
 - `Client.Run`, `Client.Signal`
+- `Runtime.TxRunner[T]()` / `Runtime.TxRunnerVia(store)` — creation inside your transaction
 - `Worker.Register` / `Worker.RegisterKind`, `ResultOf[T]`, `NotReady`
 - `WithRetention`, `WithIdempotencyKey`
 - `Manager` — inspection (`Tasks` returns each task's `DependsOn`, so the slice

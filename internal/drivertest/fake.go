@@ -15,6 +15,7 @@ import (
 	"cmp"
 	"context"
 	"encoding/json"
+	"fmt"
 	"maps"
 	"slices"
 	"strconv"
@@ -80,6 +81,7 @@ type fakeJob struct {
 	driver.Job
 	maxAttemptsExplicit bool
 	idempotencyKey      string
+	coalesceKey         string
 	// compensationPayload is the declared compensation body, inserted as the
 	// "comp:<key>" task's payload when the workflow compensates.
 	compensationPayload json.RawMessage
@@ -233,8 +235,26 @@ func (f *Fake) enqueueLocked(p driver.EnqueueParams) (bool, error) {
 			if exp, ok := f.idempotency[k]; ok && exp.After(now) {
 				return false, nil
 			}
-			f.idempotency[k] = now.Add(p.IdempotencyTTL)
 		}
+	}
+	// Coalescing: a job of the same kind and key that has not started yet
+	// absorbs this one. Like the SQL insert's WHERE, it filters the row out
+	// before any key or id check can reject it.
+	if p.CoalesceKey != "" {
+		for _, j := range f.jobs {
+			if j.Source == driver.SourceQueue && j.Kind == p.Kind && j.coalesceKey == p.CoalesceKey &&
+				(j.State == driver.StatePending || j.State == driver.StateScheduled) {
+				return false, nil
+			}
+		}
+	}
+	// PRIMARY KEY (id): checked before the reservation below is written, since
+	// the SQL insert's violation rolls the reservation back with it.
+	if _, exists := f.jobs[p.ID]; exists {
+		return false, fmt.Errorf("drivertest: job %s: %w", p.ID, driver.ErrAlreadyExists)
+	}
+	if p.IdempotencyKey != "" && p.IdempotencyTTL > 0 {
+		f.idempotency[idemKey{source: driver.SourceQueue, kind: p.Kind, key: p.IdempotencyKey}] = now.Add(p.IdempotencyTTL)
 	}
 
 	runAt := p.RunAt
@@ -257,6 +277,7 @@ func (f *Fake) enqueueLocked(p driver.EnqueueParams) (bool, error) {
 		EnqueuedAt:          now,
 		maxAttemptsExplicit: p.MaxAttemptsExplicit,
 		idempotencyKey:      p.IdempotencyKey,
+		coalesceKey:         p.CoalesceKey,
 		seq:                 f.nextSeq(),
 	}
 	f.bumpStat(driver.SourceQueue, p.Kind, statEnqueued, 1, now)
@@ -275,6 +296,9 @@ func (f *Fake) Publish(_ context.Context, p driver.PublishParams) (int, error) {
 }
 
 func (f *Fake) publishLocked(p driver.PublishParams) (int, error) {
+	if _, exists := f.events[p.ID]; exists {
+		return 0, fmt.Errorf("drivertest: event %s: %w", p.ID, driver.ErrAlreadyExists)
+	}
 	now := f.now()
 	f.events[p.ID] = driver.EventRecord{
 		ID:            p.ID,

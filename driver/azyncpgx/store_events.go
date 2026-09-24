@@ -93,7 +93,7 @@ func (s *Store) publish(ctx context.Context, q querier, p driver.PublishParams) 
 		p.ID, p.Type, p.AggregateType, p.AggregateID, p.Version, p.OccurredAt,
 		string(p.Payload), string(metaJSON),
 	); err != nil {
-		return nil, 0, fmt.Errorf("azyncpgx: append event: %w", err)
+		return nil, 0, fmt.Errorf("azyncpgx: append event: %w", alreadyExists(err, "azync_events_pkey"))
 	}
 	rows, err := q.Query(ctx, publishDeliveriesSQL, p.ID, p.Type)
 	if err != nil {

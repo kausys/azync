@@ -3,6 +3,7 @@ package azyncpgx
 import (
 	"context"
 	"errors"
+	"fmt"
 	"log/slog"
 	"sync"
 	"time"
@@ -244,6 +245,18 @@ func (s *Store) Close(_ context.Context) error {
 		s.pool.Close()
 	}
 	return nil
+}
+
+// alreadyExists maps a violation of constraint — a table's own primary key —
+// to driver.ErrAlreadyExists, keeping the PostgreSQL error as the cause. Any
+// other error, including a unique violation on another index, is returned as
+// it came.
+func alreadyExists(err error, constraint string) error {
+	var pgErr *pgconn.PgError
+	if errors.As(err, &pgErr) && pgErr.Code == pgUniqueViolation && pgErr.ConstraintName == constraint {
+		return fmt.Errorf("%w: %w", driver.ErrAlreadyExists, err)
+	}
+	return err
 }
 
 // querier is the shared read/write surface of both the pool and a pgx.Tx, so the

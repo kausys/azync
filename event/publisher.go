@@ -152,6 +152,19 @@ func (r *Runtime) TxPublisher[TTx any]() (*TxPublisherClient[TTx], error) {
 	return &TxPublisherClient[TTx]{store: ts, publisher: r.publisher}, nil
 }
 
+// TxPublisherVia builds the transactional publish client over store instead of
+// the runtime's own driver. The event is built exactly as TxPublisher builds
+// it — id, payload, metadata, trace context — and store decides where it is
+// written. It enlists a publish in a transaction on a database the runtime's
+// driver does not operate, such as an outbox kept beside the application's own
+// tables, which later forwards what it holds to the runtime's driver.
+func (r *Runtime) TxPublisherVia[TTx any](store driver.TxStore[TTx]) (*TxPublisherClient[TTx], error) {
+	if store == nil {
+		return nil, errors.New("event: TxPublisherVia store is nil")
+	}
+	return &TxPublisherClient[TTx]{store: store, publisher: r.publisher}, nil
+}
+
 // PublishTx performs Publish within tx, letting the caller atomically commit
 // application writes and the event fan-out. It returns the new event's id.
 func (c *TxPublisherClient[TTx]) PublishTx(ctx context.Context, tx TTx, args EventArgs, opts ...PublishOption) (uuid.UUID, error) {

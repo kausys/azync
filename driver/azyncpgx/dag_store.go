@@ -114,7 +114,7 @@ func (s *Store) createDAG(ctx context.Context, q querier, p driver.DAGParams) (b
 		return false, toUUID(existing), nil
 	}
 	if err != nil {
-		return false, uuid.Nil, fmt.Errorf("azyncpgx: insert dag: %w", err)
+		return false, uuid.Nil, fmt.Errorf("azyncpgx: insert dag: %w", alreadyExists(err, "azync_dags_pkey"))
 	}
 
 	// A task is born blocked when it has dependencies; otherwise its runnable

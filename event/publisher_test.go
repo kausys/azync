@@ -182,3 +182,42 @@ func TestTxPublisherPublishesThroughTx(t *testing.T) {
 	// The fan-out created the billing delivery inside the same call.
 	is.Equal(driver.StatePending, deliveryOf(t, f.Fake, "billing").State)
 }
+
+// TestTxPublisherViaWritesThroughTheGivenStore proves the split TxPublisherVia
+// exists for: the runtime builds the event, the store handed in writes it. The
+// runtime's own driver has no transactional capability and receives nothing.
+func TestTxPublisherViaWritesThroughTheGivenStore(t *testing.T) {
+	t.Parallel()
+	is := require.New(t)
+	ctx := context.Background()
+	r := newTestRuntime(t, drivertest.NewFake()) // implements no TxStore
+	other := &txFake{Fake: drivertest.NewFake()}
+	otherCore, err := azync.New(other, azync.WithLogger(discardLogger()))
+	is.NoError(err)
+	otherRuntime, err := New(otherCore, fastOptions()...)
+	is.NoError(err)
+	register(t, otherRuntime, "billing", orderCreated{}.EventType(), 3)
+
+	tp, err := r.TxPublisherVia(other) // TTx inferred from the store's methods
+	is.NoError(err)
+	id, err := tp.PublishTx(ctx, struct{}{}, orderCreated{Value: "via"}, WithMeta("origin", "outbox"))
+	is.NoError(err)
+
+	written, err := otherRuntime.Manager().Get(ctx, id)
+	is.NoError(err)
+	is.NotNil(written, "the given store received the event")
+	is.JSONEq(`{"value":"via"}`, string(written.Payload))
+	is.Equal("outbox", written.Meta["origin"])
+	is.Equal(driver.StatePending, deliveryOf(t, other.Fake, "billing").State)
+
+	own, err := r.Manager().Get(ctx, id)
+	is.NoError(err)
+	is.Nil(own, "the runtime's own driver received nothing")
+}
+
+func TestTxPublisherViaRefusesANilStore(t *testing.T) {
+	t.Parallel()
+	r := newTestRuntime(t, drivertest.NewFake())
+	_, err := r.TxPublisherVia[struct{}](nil)
+	require.ErrorContains(t, err, "store is nil")
+}

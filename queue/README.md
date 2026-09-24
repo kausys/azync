@@ -26,7 +26,7 @@ Requires Core + job store. Cron needs `driver.LeaderElector`. No DAG/WorkflowSto
 
 - `New` / `Open` → `Producer`, `Worker`, `Manager`
 - `Worker.Register` / `Worker.RegisterKind` / `Worker.RegisterCron`
-- `Runtime.TxProducer[T]()`
+- `Runtime.TxProducer[T]()` / `Runtime.TxProducerVia(store)`
 - Enqueue / worker / manager options (see GoDoc)
 
 ## Boundaries

@@ -110,7 +110,7 @@ txc, err := d.TxRunner[pgx.Tx]() // needs driver.TxDAGStore
 res, err := txc.RunTx(ctx, tx, def, dag.WithIdempotencyKey(key))
 ```
 
-Over `database/sql`, build the Core over `store.SQLTx()` and use `d.TxRunner[*sql.Tx]()` — see [queue.md](queue.md#over-databasesql).
+Over `database/sql`, build the Core over `store.SQLTx()` and use `d.TxRunner[*sql.Tx]()` — see [queue.md](queue.md#over-databasesql). `d.TxRunnerVia(store)` builds the same client over a store you choose — see [queue.md](queue.md#through-another-store).
 
 ## Retention
 

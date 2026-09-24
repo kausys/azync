@@ -7,6 +7,15 @@ import "errors"
 // UnimplementedStore returns it for every method.
 var ErrNotSupported = errors.New("azync: capability not supported by driver")
 
+// ErrAlreadyExists reports that Publish, Enqueue or CreateDAG (or their Tx
+// forms) was handed an ID that is already present. Callers assign IDs, so a
+// repeat means the same write was already made: a caller forwarding writes it
+// captured elsewhere — an outbox — treats it as done. It is returned only when
+// nothing deduplicated the write first: a live idempotency key still answers
+// inserted=false (or the live DAG's id) without error. Drivers wrap it, so
+// match it with errors.Is.
+var ErrAlreadyExists = errors.New("azync: id already exists")
+
 // notFoundError is the contract's wrong-state / missing-row sentinel. Settlement
 // and admin operations return it when their target row was not in the expected
 // state; the runtime layer maps it to a 404-style outcome.

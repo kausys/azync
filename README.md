@@ -24,7 +24,7 @@ All four runtimes compose over one `azync.Core` and never import each other; `wa
 
 - **One table for runnable work.** Queue jobs, event deliveries, DAG tasks, and workflow tasks share `azync_jobs`, partitioned by `source`.
 - **Durable event bus.** Insert-only ledger, atomic fan-out, Replay from history.
-- **Transactional outbox.** Enlist enqueue / publish / DAG run in your own backend transaction.
+- **Transactional outbox.** Enlist enqueue / publish / DAG run in your own backend transaction — or, when your tables live in another database, capture it beside them and forward it later ([outbox.md](outbox.md)).
 - **Driver contract.** Implement `driver.Store` (+ optional capabilities); validate with the conformance suite.
 - **Lease fencing + reaper.** At-least-once delivery with real fencing tokens.
 - **Two orchestration styles.** Declared graphs ([dag.md](dag.md)) or ordinary Go with deterministic replay ([workflow.md](workflow.md)).
@@ -71,6 +71,7 @@ wf, _ := workflow.New(core) // needs driver.WorkflowStore
 | [dag.md](dag.md) | [`examples/dag-basic`](https://github.com/kausys/azync/tree/main/examples/dag-basic) |
 | [workflow.md](workflow.md) | [`examples/workflow-kyc`](https://github.com/kausys/azync/tree/main/examples/workflow-kyc) |
 | [watch.md](watch.md) | [`examples/watch-sse`](https://github.com/kausys/azync/tree/main/examples/watch-sse) |
+| [outbox.md](outbox.md) | [`examples/outbox`](https://github.com/kausys/azync/tree/main/examples/outbox) |
 
 ## Roadmap
 
@@ -113,7 +114,11 @@ Release-As: 0.0.8
 
 `bump-minor-pre-major` is not set in `release-please-config.json` and its
 default is `false`, so release-please reads any breaking change on a `0.x` line
-as `1.0.0`. `Release-As:` is what pins it. The API is still moving and nearly
+as `1.0.0`. `Release-As:` is what pins it.
+
+**The same holds for a plain `feat:`.** `bump-patch-for-minor-pre-major` is not
+set either, so a feature on `0.0.x` is proposed as `0.1.0`. Pin every cycle
+that adds one — once, on its first `feat:` commit — as 0.0.8 did. The API is still moving and nearly
 every release so far has been breaking, so the footer is the norm here, not an
 exception — and omitting it does not fail anything, it silently proposes a
 major.

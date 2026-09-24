@@ -70,6 +70,7 @@ go func() {
 | `queue.At(t)` | Run at time (wins over Delay) |
 | `queue.IdempotencyKey(k)` | Dedupe while a live job with key exists |
 | `queue.IdempotencyKeyTTL(k, window)` | Dedupe window |
+| `queue.CoalesceKey(k)` | Drop while a job of the same kind and key has not started; never while one is running |
 | `queue.MaxRetries(n)` | Per-enqueue retry budget |
 | `queue.Meta(key, value)` | Opaque metadata on the job |
 
@@ -130,6 +131,16 @@ err = tx.Commit()
 ```
 
 The statements enlisted are the same ones the `pgx.Tx` path runs, and the worker wakeup is sent inside the transaction, so it fires only on commit. A Core serves one transaction type: over `SQLTx()` it refuses `pgx.Tx`.
+
+### Through another store
+
+`TxProducer` writes through the runtime's own driver. `TxProducerVia(store)` builds the same client over any `driver.TxStore` you hand it: the runtime still builds the job — id, payload, schedule, keys, metadata, trace context — and `store` decides where it is written. The transaction type is inferred from the store.
+
+```go
+producer, err := q.TxProducerVia(store) // any driver.TxStore[TTx]; TTx is inferred from it
+```
+
+That is how a write lands in a database the runtime does not operate, such as an outbox beside the application's tables. `event` and `dag` have the same pair: `TxPublisherVia`, `TxRunnerVia`.
 
 ## Cron
 
