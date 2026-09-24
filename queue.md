@@ -44,7 +44,7 @@ type WelcomeEmail struct {
 
 func (WelcomeEmail) Kind() string { return "app.email.welcome" }
 
-err = queue.Register(q.Worker(), func(ctx context.Context, job WelcomeEmail) error {
+err = q.Worker().Register(func(ctx context.Context, job WelcomeEmail) error {
     log.Printf("send to %s (attempt %d)", job.To, queue.Attempt(ctx))
     return nil
 })
@@ -98,7 +98,7 @@ Enqueue inside a transaction you already opened. Rollback → no job.
 ```go
 import "github.com/jackc/pgx/v5"
 
-producer, err := queue.TxProducer[pgx.Tx](q) // needs driver.TxStore[pgx.Tx]
+producer, err := q.TxProducer[pgx.Tx]() // needs driver.TxStore[pgx.Tx]
 if err != nil { /* driver does not support tx enlist */ }
 
 err = pgx.BeginFunc(ctx, pool, func(tx pgx.Tx) error {

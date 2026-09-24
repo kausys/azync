@@ -226,7 +226,7 @@ func (c *Client) SignalByKey(ctx context.Context, name, idempotencyKey, signalNa
 
 // TxRunnerClient creates dags inside the caller's own backend
 // transaction, so the creation commits atomically with the caller's writes
-// (outbox pattern). Build one with TxRunner.
+// (outbox pattern). Build one with [Runtime.TxRunner].
 type TxRunnerClient[TTx any] struct {
 	store  driver.TxDAGStore[TTx]
 	client *Client
@@ -236,7 +236,7 @@ type TxRunnerClient[TTx any] struct {
 // transaction handle type TTx (e.g. pgx.Tx for the pg driver). It fails
 // immediately when the runtime's driver does not support transactional
 // workflow creation for that type.
-func TxRunner[TTx any](r *Runtime) (*TxRunnerClient[TTx], error) {
+func (r *Runtime) TxRunner[TTx any]() (*TxRunnerClient[TTx], error) {
 	store := r.core.Store()
 	ts, ok := store.(driver.TxDAGStore[TTx])
 	if !ok {

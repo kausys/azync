@@ -20,8 +20,8 @@ func TestRegisterDuplicateKindFails(t *testing.T) {
 	r := newTestRuntime(t, drivertest.NewFake())
 
 	handler := func(context.Context, testArgs) error { return nil }
-	is.NoError(Register(r.Worker(), handler))
-	err := Register(r.Worker(), handler)
+	is.NoError(r.Worker().Register(handler))
+	err := r.Worker().Register(handler)
 	is.Error(err)
 	is.Contains(err.Error(), `queue: kind "queue.test" already registered`)
 }
@@ -30,12 +30,12 @@ func TestRegisterAfterStartFails(t *testing.T) {
 	t.Parallel()
 	is := require.New(t)
 	r := newTestRuntime(t, drivertest.NewFake())
-	is.NoError(Register(r.Worker(), func(context.Context, testArgs) error { return nil }))
+	is.NoError(r.Worker().Register(func(context.Context, testArgs) error { return nil }))
 
 	startWorker(t, r.Worker())
 	awaitReady(t, r.Worker())
 
-	err := RegisterKind(r.Worker(), "late.kind", func(context.Context, json.RawMessage) error { return nil })
+	err := r.Worker().RegisterKind("late.kind", func(context.Context, json.RawMessage) error { return nil })
 	is.Error(err)
 	is.Contains(err.Error(), "queue: cannot register after start")
 }
@@ -47,7 +47,7 @@ func TestUndecodablePayloadDeadLettersWithoutHandler(t *testing.T) {
 	r := newTestRuntime(t, f)
 
 	var handlerRuns atomic.Int32
-	is.NoError(Register(r.Worker(), func(context.Context, testArgs) error {
+	is.NoError(r.Worker().Register(func(context.Context, testArgs) error {
 		handlerRuns.Add(1)
 		return nil
 	}))
@@ -86,7 +86,7 @@ func TestRegisterKindPassesRawPayloadThrough(t *testing.T) {
 		meta    map[string]string
 	}
 	got := make(chan rawDelivery, 1)
-	is.NoError(RegisterKind(r.Worker(), "raw.kind", func(ctx context.Context, payload json.RawMessage) error {
+	is.NoError(r.Worker().RegisterKind("raw.kind", func(ctx context.Context, payload json.RawMessage) error {
 		got <- rawDelivery{
 			id:      JobID(ctx),
 			kind:    Kind(ctx),
@@ -125,7 +125,7 @@ func TestWithMaxRetriesResolvesOnFirstLease(t *testing.T) {
 	r := newTestRuntime(t, f, WithDefaultMaxRetries(25))
 
 	done := make(chan struct{}, 1)
-	is.NoError(Register(r.Worker(), func(context.Context, testArgs) error {
+	is.NoError(r.Worker().Register(func(context.Context, testArgs) error {
 		done <- struct{}{}
 		return nil
 	}, WithMaxRetries(7)))

@@ -60,7 +60,7 @@ func WithTaskTimeout(d time.Duration) RegisterOption {
 // ctx (ID, TaskKey, Attempt, ...) and dependency outputs are read with
 // ResultOf. Same rules as Register: it fails on a kind with the reserved "$"
 // prefix, on duplicate kinds (typed or raw) and after Start.
-func RegisterKind(w *Worker, kind string, handler func(ctx context.Context, payload json.RawMessage) (json.RawMessage, error), opts ...RegisterOption) error {
+func (w *Worker) RegisterKind(kind string, handler func(ctx context.Context, payload json.RawMessage) (json.RawMessage, error), opts ...RegisterOption) error {
 	if strings.HasPrefix(kind, "$") {
 		return fmt.Errorf("dag: kind %q is reserved (the \"$\" prefix belongs to internal tasks)", kind)
 	}
@@ -104,11 +104,11 @@ func RegisterKind(w *Worker, kind string, handler func(ctx context.Context, payl
 // nothing. Task metadata travels on ctx (ID, TaskKey, Attempt, ...).
 // It fails on duplicate kinds and after Start — registration happens in the
 // composition root, before the worker runs.
-func Register[T TaskArgs, R any](w *Worker, fn func(ctx context.Context, task T) (R, error), opts ...RegisterOption) error {
+func (w *Worker) Register[T TaskArgs, R any](fn func(ctx context.Context, task T) (R, error), opts ...RegisterOption) error {
 	var zero T
 	kind := zero.Kind()
 
-	return RegisterKind(w, kind, func(ctx context.Context, payload json.RawMessage) (json.RawMessage, error) {
+	return w.RegisterKind(kind, func(ctx context.Context, payload json.RawMessage) (json.RawMessage, error) {
 		var task T
 		if err := json.Unmarshal(payload, &task); err != nil {
 			// A payload that cannot decode will never decode — retrying is futile.

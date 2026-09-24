@@ -81,8 +81,8 @@ func TestEventFanOutDeliversCompleteDelivery(t *testing.T) {
 		deliveries <- captureEvent(ctx, ev)
 		return nil
 	}
-	is.NoError(event.RegisterFunc(e.Worker(), "billing", handler))
-	is.NoError(event.RegisterFunc(e.Worker(), "notify", handler))
+	is.NoError(e.Worker().RegisterFunc("billing", handler))
+	is.NoError(e.Worker().RegisterFunc("notify", handler))
 	startWorker(t, e.Worker())
 	awaitEventReady(t, e)
 
@@ -126,7 +126,7 @@ func TestEventFailingSubscriberRetriesToDead(t *testing.T) {
 	e := newEvent(t, h)
 	ctx := context.Background()
 
-	is.NoError(event.RegisterFunc(e.Worker(), "flaky", func(context.Context, orderEvent) error {
+	is.NoError(e.Worker().RegisterFunc("flaky", func(context.Context, orderEvent) error {
 		return errors.New("subscriber keeps failing")
 	}, event.WithMaxAttempts(2)))
 	startWorker(t, e.Worker())
@@ -149,7 +149,7 @@ func TestEventReplayDeliversWithReplayFlag(t *testing.T) {
 	ctx := context.Background()
 
 	replays := make(chan bool, 4)
-	is.NoError(event.RegisterFunc(e.Worker(), "proj", func(ctx context.Context, _ orderEvent) error {
+	is.NoError(e.Worker().RegisterFunc("proj", func(ctx context.Context, _ orderEvent) error {
 		replays <- event.IsReplay(ctx)
 		return nil
 	}))

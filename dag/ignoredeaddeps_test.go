@@ -28,7 +28,7 @@ func TestIgnoreDeadDepsMixedTriggersPolicy(t *testing.T) {
 	f := drivertest.NewFake()
 	r := newTestRuntime(t, f)
 
-	is.NoError(Register(r.Worker(), func(context.Context, iddRoot) (None, error) {
+	is.NoError(r.Worker().Register(func(context.Context, iddRoot) (None, error) {
 		return None{}, Abort(testError("root dies"))
 	}))
 	// t1 (tolerant) and t2 (strict) are intentionally unregistered so they can
@@ -60,10 +60,10 @@ func TestIgnoreDeadDepsFullyToleratedRunsButFails(t *testing.T) {
 	r := newTestRuntime(t, f)
 
 	var tolRan atomic.Int32
-	is.NoError(Register(r.Worker(), func(context.Context, iddRoot) (None, error) {
+	is.NoError(r.Worker().Register(func(context.Context, iddRoot) (None, error) {
 		return None{}, Abort(testError("root dies"))
 	}))
-	is.NoError(Register(r.Worker(), func(context.Context, iddTol) (None, error) {
+	is.NoError(r.Worker().Register(func(context.Context, iddTol) (None, error) {
 		tolRan.Add(1)
 		return None{}, nil
 	}))
@@ -97,7 +97,7 @@ func TestIgnoreDeadDepsLeafAlwaysTriggers(t *testing.T) {
 	f := drivertest.NewFake()
 	r := newTestRuntime(t, f)
 
-	is.NoError(Register(r.Worker(), func(context.Context, iddRoot) (None, error) {
+	is.NoError(r.Worker().Register(func(context.Context, iddRoot) (None, error) {
 		return None{}, Abort(testError("leaf dies"))
 	}))
 	// A single tolerant leaf: IgnoreDeadDeps concerns its (absent) upstream deps,

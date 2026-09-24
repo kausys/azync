@@ -26,11 +26,11 @@ func TestReconcilerRevivesStalledExecution(t *testing.T) {
 	r := newTestRuntime(t, f, WithLeaseTTL(time.Second))
 
 	var calls int
-	RegisterOperation(r.Worker(), "op", "1", func(context.Context, struct{}) (string, error) {
+	r.Worker().RegisterOperation("op", "1", func(context.Context, struct{}) (string, error) {
 		calls++
 		return "done", nil
 	})
-	RegisterWorkflow(r.Worker(), "wf-stalled", "1", func(ctx Context, _ struct{}) (string, error) {
+	r.Worker().RegisterWorkflow("wf-stalled", "1", func(ctx Context, _ struct{}) (string, error) {
 		var out string
 		if err := ExecuteOperation(ctx, "op", "1", struct{}{}).Get(&out); err != nil {
 			return "", err
@@ -72,13 +72,13 @@ func TestReconcilerIgnoresHealthyAndTooRecentExecutions(t *testing.T) {
 	f.Clock = clk
 	r := newTestRuntime(t, f, WithLeaseTTL(time.Second))
 
-	RegisterWorkflow(r.Worker(), "wf-healthy", "1", func(Context, struct{}) (string, error) {
+	r.Worker().RegisterWorkflow("wf-healthy", "1", func(Context, struct{}) (string, error) {
 		return "ok", nil
 	})
 	healthy, err := r.Client().Start(ctx, "wf-healthy", "1", nil)
 	is.NoError(err)
 
-	RegisterWorkflow(r.Worker(), "wf-recent", "1", func(Context, struct{}) (string, error) {
+	r.Worker().RegisterWorkflow("wf-recent", "1", func(Context, struct{}) (string, error) {
 		return "ok", nil
 	})
 	_, err = r.Client().Start(ctx, "wf-recent", "1", nil)
@@ -114,11 +114,11 @@ func TestReconcileLoopRunsOnItsOwnTicker(t *testing.T) {
 	r := newTestRuntime(t, f, WithLeaseTTL(time.Millisecond), withReconcileInterval(20*time.Millisecond))
 
 	var calls int
-	RegisterOperation(r.Worker(), "op", "1", func(context.Context, struct{}) (string, error) {
+	r.Worker().RegisterOperation("op", "1", func(context.Context, struct{}) (string, error) {
 		calls++
 		return "done", nil
 	})
-	RegisterWorkflow(r.Worker(), "wf-loop-stalled", "1", func(ctx Context, _ struct{}) (string, error) {
+	r.Worker().RegisterWorkflow("wf-loop-stalled", "1", func(ctx Context, _ struct{}) (string, error) {
 		var out string
 		if err := ExecuteOperation(ctx, "op", "1", struct{}{}).Get(&out); err != nil {
 			return "", err

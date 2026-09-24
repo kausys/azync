@@ -90,7 +90,7 @@ func run() error {
 	if err != nil {
 		return fmt.Errorf("new queue runtime: %w", err)
 	}
-	err = queue.Register(q.Worker(), func(context.Context, tickJob) error {
+	err = q.Worker().Register(func(context.Context, tickJob) error {
 		time.Sleep(300 * time.Millisecond) // let "active" be visible
 		return nil
 	})

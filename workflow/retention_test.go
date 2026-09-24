@@ -19,7 +19,7 @@ func TestVacuumWorkflowsRemovesTerminalPastRetention(t *testing.T) {
 	f.Clock = clk
 	r := newTestRuntime(t, f, WithRetention(time.Hour), withVacuumInterval(time.Minute))
 
-	RegisterWorkflow(r.Worker(), "wf-vac", "1", func(ctx Context, _ struct{}) (struct{}, error) {
+	r.Worker().RegisterWorkflow("wf-vac", "1", func(ctx Context, _ struct{}) (struct{}, error) {
 		return struct{}{}, nil
 	})
 
@@ -46,10 +46,10 @@ func TestVacuumCompletedExemptsWorkflowJobs(t *testing.T) {
 	f := drivertest.NewFake()
 	r := newTestRuntime(t, f)
 
-	RegisterOperation(r.Worker(), "noop", "1", func(_ context.Context, _ struct{}) (string, error) {
+	r.Worker().RegisterOperation("noop", "1", func(_ context.Context, _ struct{}) (string, error) {
 		return "x", nil
 	})
-	RegisterWorkflow(r.Worker(), "wf-exempt", "1", func(ctx Context, _ struct{}) (string, error) {
+	r.Worker().RegisterWorkflow("wf-exempt", "1", func(ctx Context, _ struct{}) (string, error) {
 		var out string
 		if err := ExecuteOperation(ctx, "noop", "1", struct{}{}).Get(&out); err != nil {
 			return "", err
@@ -81,7 +81,7 @@ func TestOperationHeartbeatSurvivesShortLease(t *testing.T) {
 		WithOperationTimeout(5*time.Second),
 	)
 
-	RegisterOperation(r.Worker(), "slow", "1", func(ctx context.Context, _ struct{}) (string, error) {
+	r.Worker().RegisterOperation("slow", "1", func(ctx context.Context, _ struct{}) (string, error) {
 		select {
 		case <-time.After(250 * time.Millisecond):
 			return "ok", nil
@@ -89,7 +89,7 @@ func TestOperationHeartbeatSurvivesShortLease(t *testing.T) {
 			return "", ctx.Err()
 		}
 	})
-	RegisterWorkflow(r.Worker(), "wf-hb", "1", func(ctx Context, _ struct{}) (string, error) {
+	r.Worker().RegisterWorkflow("wf-hb", "1", func(ctx Context, _ struct{}) (string, error) {
 		var out string
 		if err := ExecuteOperation(ctx, "slow", "1", struct{}{}).Get(&out); err != nil {
 			return "", err

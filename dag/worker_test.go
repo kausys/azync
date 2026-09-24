@@ -96,7 +96,7 @@ func TestNotReadyReChecksWithoutConsumingBudget(t *testing.T) {
 	// Budget 1: if NotReady consumed an attempt, the first re-check would
 	// exhaust the budget and dead-letter the task instead of re-polling.
 	var runs atomic.Int32
-	is.NoError(Register(r.Worker(), func(context.Context, pollArgs) (None, error) {
+	is.NoError(r.Worker().Register(func(context.Context, pollArgs) (None, error) {
 		if runs.Add(1) == 1 {
 			return None{}, NotReady(time.Hour)
 		}
@@ -160,10 +160,10 @@ func TestDiamondPromotesCascadeAndFlowsResults(t *testing.T) {
 
 	missingErrs := make(chan error, 1)
 	finals := make(chan sum, 1)
-	is.NoError(Register(r.Worker(), func(_ context.Context, a diamondA) (sum, error) {
+	is.NoError(r.Worker().Register(func(_ context.Context, a diamondA) (sum, error) {
 		return sum{Sum: a.Base + 1}, nil
 	}))
-	is.NoError(Register(r.Worker(), func(ctx context.Context, _ diamondB) (sum, error) {
+	is.NoError(r.Worker().Register(func(ctx context.Context, _ diamondB) (sum, error) {
 		if _, err := ResultOf[sum](ctx, "never-declared"); err != nil {
 			select {
 			case missingErrs <- err:
@@ -176,14 +176,14 @@ func TestDiamondPromotesCascadeAndFlowsResults(t *testing.T) {
 		}
 		return sum{Sum: a.Sum * 10}, nil
 	}))
-	is.NoError(Register(r.Worker(), func(ctx context.Context, _ diamondC) (sum, error) {
+	is.NoError(r.Worker().Register(func(ctx context.Context, _ diamondC) (sum, error) {
 		a, err := ResultOf[sum](ctx, "a")
 		if err != nil {
 			return sum{}, err
 		}
 		return sum{Sum: a.Sum * 100}, nil
 	}))
-	is.NoError(Register(r.Worker(), func(ctx context.Context, _ diamondD) (sum, error) {
+	is.NoError(r.Worker().Register(func(ctx context.Context, _ diamondD) (sum, error) {
 		b, err := ResultOf[sum](ctx, "b")
 		if err != nil {
 			return sum{}, err
@@ -262,7 +262,7 @@ func TestBarrierPatternStartsDownstreamExactlyOnce(t *testing.T) {
 	releaseDown.Add(1)
 	downDef := Define("barrier-down").Task("start", barrierDown{})
 
-	is.NoError(Register(r.Worker(), func(ctx context.Context, _ barrierUp) (None, error) {
+	is.NoError(r.Worker().Register(func(ctx context.Context, _ barrierUp) (None, error) {
 		res, err := r.Client().Run(ctx, downDef, WithIdempotencyKey("kyb-1"))
 		if err != nil {
 			return None{}, err
@@ -275,7 +275,7 @@ func TestBarrierPatternStartsDownstreamExactlyOnce(t *testing.T) {
 		upDone <- struct{}{}
 		return None{}, nil
 	}, WithConcurrency(n)))
-	is.NoError(Register(r.Worker(), func(context.Context, barrierDown) (None, error) {
+	is.NoError(r.Worker().Register(func(context.Context, barrierDown) (None, error) {
 		releaseDown.Wait()
 		return None{}, nil
 	}))

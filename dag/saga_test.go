@@ -35,13 +35,13 @@ func TestCancelPolicyRunsCompensationsInReverseOrder(t *testing.T) {
 
 	var mu sync.Mutex
 	var order []string
-	is.NoError(Register(r.Worker(), func(_ context.Context, d sagaDo) (None, error) {
+	is.NoError(r.Worker().Register(func(_ context.Context, d sagaDo) (None, error) {
 		if d.Step == "c" {
 			return None{}, Abort(testError("step c is doomed"))
 		}
 		return None{}, nil
 	}))
-	is.NoError(Register(r.Worker(), func(_ context.Context, u sagaUndo) (None, error) {
+	is.NoError(r.Worker().Register(func(_ context.Context, u sagaUndo) (None, error) {
 		mu.Lock()
 		order = append(order, u.Step)
 		mu.Unlock()

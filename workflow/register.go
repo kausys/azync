@@ -26,7 +26,7 @@ func registrationKey(name, version string) string { return name + "@" + version 
 // version). Workers refuse workflow-task jobs whose execution names a pair
 // nothing registered (see ErrUnknownWorkflow). Call every RegisterWorkflow /
 // RegisterOperation before Worker.Start.
-func RegisterWorkflow[TIn, TOut any](w *Worker, name, version string, fn func(ctx Context, in TIn) (TOut, error)) {
+func (w *Worker) RegisterWorkflow[TIn, TOut any](name, version string, fn func(ctx Context, in TIn) (TOut, error)) {
 	w.registerWorkflow(name, version, func(ctx Context, raw json.RawMessage) (json.RawMessage, error) {
 		var in TIn
 		if len(raw) > 0 {
@@ -50,7 +50,7 @@ func RegisterWorkflow[TIn, TOut any](w *Worker, name, version string, fn func(ct
 // version). An Operation is the only allowed external I/O in workflow-as-code
 // (see docs/workflow-v1-spec.md §4); its handler receives a plain
 // context.Context, never the deterministic workflow.Context.
-func RegisterOperation[TIn, TOut any](w *Worker, name, version string, fn func(ctx context.Context, in TIn) (TOut, error)) {
+func (w *Worker) RegisterOperation[TIn, TOut any](name, version string, fn func(ctx context.Context, in TIn) (TOut, error)) {
 	w.registerOperation(name, version, func(ctx context.Context, raw json.RawMessage) (json.RawMessage, error) {
 		var in TIn
 		if len(raw) > 0 {

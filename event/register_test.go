@@ -115,7 +115,7 @@ func TestRegisterFuncDeliversTypedEndToEnd(t *testing.T) {
 	ctx := context.Background()
 
 	got := make(chan orderCreated, 1)
-	is.NoError(RegisterFunc(r.Worker(), "billing",
+	is.NoError(r.Worker().RegisterFunc("billing",
 		func(_ context.Context, e orderCreated) error { got <- e; return nil },
 		WithMaxAttempts(4)))
 

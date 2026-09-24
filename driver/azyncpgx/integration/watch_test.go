@@ -8,7 +8,6 @@ import (
 	"time"
 
 	"github.com/kausys/azync/driver"
-	"github.com/kausys/azync/queue"
 	"github.com/kausys/azync/watch"
 
 	"github.com/google/uuid"
@@ -48,7 +47,7 @@ func TestWatchDeliversJobLifecycle(t *testing.T) {
 	ctx := context.Background()
 
 	q := newQueue(t, h)
-	is.NoError(queue.Register(q.Worker(), func(context.Context, itJob) error { return nil }))
+	is.NoError(q.Worker().Register(func(context.Context, itJob) error { return nil }))
 
 	w, err := watch.New(h.core)
 	is.NoError(err)

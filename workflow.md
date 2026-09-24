@@ -22,13 +22,13 @@ Migrate the Core. Register every `(name, version)` for workflows and Operations 
 ## Register and start
 
 ```go
-workflow.RegisterWorkflow(wf.Worker(), "kyc", "1",
+wf.Worker().RegisterWorkflow("kyc", "1",
     func(ctx workflow.Context, in KYCInput) (KYCResult, error) {
         // deterministic orchestration only
         return KYCResult{}, nil
     })
 
-workflow.RegisterOperation(wf.Worker(), "check-status", "1",
+wf.Worker().RegisterOperation("check-status", "1",
     func(ctx context.Context, in CheckIn) (CheckOut, error) {
         // real I/O here — make it idempotent
         key := workflow.ExecutionKey(ctx) // "{workflowID}:{eventSeq}"
@@ -151,7 +151,7 @@ concerns).
 | Effects | Operations only | Task handlers |
 | Park | `Select` over Futures | Sleep / WaitSignal nodes |
 | Saga / compensate | Not in MVP | First-class |
-| Tx create | — | `TxRunner` |
+| Tx create | — | `Runtime.TxRunner` |
 
 ## See also
 

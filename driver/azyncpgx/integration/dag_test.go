@@ -9,7 +9,6 @@ import (
 
 	"github.com/kausys/azync/dag"
 	"github.com/kausys/azync/event"
-	"github.com/kausys/azync/queue"
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
@@ -92,24 +91,24 @@ func TestDAGDiamondFlowsResults(t *testing.T) {
 	ctx := context.Background()
 
 	final := make(chan int, 1)
-	is.NoError(dag.Register(r.Worker(), func(_ context.Context, a diamondSeed) (wfNum, error) {
+	is.NoError(r.Worker().Register(func(_ context.Context, a diamondSeed) (wfNum, error) {
 		return wfNum{N: a.Base + 1}, nil
 	}))
-	is.NoError(dag.Register(r.Worker(), func(ctx context.Context, _ diamondUp) (wfNum, error) {
+	is.NoError(r.Worker().Register(func(ctx context.Context, _ diamondUp) (wfNum, error) {
 		a, err := dag.ResultOf[wfNum](ctx, "a")
 		if err != nil {
 			return wfNum{}, err
 		}
 		return wfNum{N: a.N * 10}, nil
 	}))
-	is.NoError(dag.Register(r.Worker(), func(ctx context.Context, _ diamondSide) (wfNum, error) {
+	is.NoError(r.Worker().Register(func(ctx context.Context, _ diamondSide) (wfNum, error) {
 		a, err := dag.ResultOf[wfNum](ctx, "a")
 		if err != nil {
 			return wfNum{}, err
 		}
 		return wfNum{N: a.N * 100}, nil
 	}))
-	is.NoError(dag.Register(r.Worker(), func(ctx context.Context, _ diamondSink) (wfNum, error) {
+	is.NoError(r.Worker().Register(func(ctx context.Context, _ diamondSink) (wfNum, error) {
 		b, err := dag.ResultOf[wfNum](ctx, "b")
 		if err != nil {
 			return wfNum{}, err
@@ -171,7 +170,7 @@ func TestDAGNotReadyPollsWithoutConsumingBudget(t *testing.T) {
 	var runs atomic.Int32
 	// Budget 1: were NotReady a real attempt, the first re-check would exhaust
 	// the budget and dead-letter the task instead of polling on.
-	is.NoError(dag.Register(r.Worker(), func(_ context.Context, _ provisionPoll) (dag.None, error) {
+	is.NoError(r.Worker().Register(func(_ context.Context, _ provisionPoll) (dag.None, error) {
 		if runs.Add(1) <= 3 {
 			return dag.None{}, dag.NotReady(100 * time.Millisecond)
 		}
@@ -207,7 +206,7 @@ func TestDAGSleepAdvancedBySignal(t *testing.T) {
 	m := r.Manager()
 	ctx := context.Background()
 
-	is.NoError(dag.Register(r.Worker(), func(context.Context, sleepFinish) (dag.None, error) {
+	is.NoError(r.Worker().Register(func(context.Context, sleepFinish) (dag.None, error) {
 		return dag.None{}, nil
 	}))
 
@@ -255,7 +254,7 @@ func TestDAGWaitSignalDeliversPayload(t *testing.T) {
 	ctx := context.Background()
 
 	gotBy := make(chan string, 1)
-	is.NoError(dag.Register(r.Worker(), func(ctx context.Context, _ approvalAct) (dag.None, error) {
+	is.NoError(r.Worker().Register(func(ctx context.Context, _ approvalAct) (dag.None, error) {
 		a, err := dag.ResultOf[approvalPayload](ctx, "approved")
 		if err != nil {
 			return dag.None{}, err
@@ -323,13 +322,13 @@ func TestDAGCancelPolicyRunsCompensationsInReverseOrder(t *testing.T) {
 
 	var mu sync.Mutex
 	var order []string
-	is.NoError(dag.Register(r.Worker(), func(_ context.Context, d sagaStep) (dag.None, error) {
+	is.NoError(r.Worker().Register(func(_ context.Context, d sagaStep) (dag.None, error) {
 		if d.Step == "c" {
 			return dag.None{}, dag.Abort(stringError("step c is doomed"))
 		}
 		return dag.None{}, nil
 	}))
-	is.NoError(dag.Register(r.Worker(), func(_ context.Context, u sagaComp) (dag.None, error) {
+	is.NoError(r.Worker().Register(func(_ context.Context, u sagaComp) (dag.None, error) {
 		mu.Lock()
 		order = append(order, u.Step)
 		mu.Unlock()
@@ -380,7 +379,7 @@ func TestDAGSuspendPolicyThenManagerRetry(t *testing.T) {
 	ctx := context.Background()
 
 	var runs atomic.Int32
-	is.NoError(dag.Register(r.Worker(), func(context.Context, suspendFlaky) (dag.None, error) {
+	is.NoError(r.Worker().Register(func(context.Context, suspendFlaky) (dag.None, error) {
 		if runs.Add(1) == 1 {
 			return dag.None{}, dag.Abort(stringError("first run aborts"))
 		}
@@ -430,7 +429,7 @@ func TestDAGBarrierStartsDownstreamExactlyOnce(t *testing.T) {
 	upDone := make(chan struct{}, n)
 	businessDef := dag.Define("it-business").Task("start", businessStart{})
 
-	is.NoError(dag.Register(r.Worker(), func(ctx context.Context, _ uboCheck) (dag.None, error) {
+	is.NoError(r.Worker().Register(func(ctx context.Context, _ uboCheck) (dag.None, error) {
 		out, err := r.Client().Run(ctx, businessDef, dag.WithIdempotencyKey("kyb-42"))
 		if err != nil {
 			return dag.None{}, err
@@ -443,7 +442,7 @@ func TestDAGBarrierStartsDownstreamExactlyOnce(t *testing.T) {
 		upDone <- struct{}{}
 		return dag.None{}, nil
 	}, dag.WithConcurrency(n)))
-	is.NoError(dag.Register(r.Worker(), func(context.Context, businessStart) (dag.None, error) {
+	is.NoError(r.Worker().Register(func(context.Context, businessStart) (dag.None, error) {
 		businessRuns.Add(1)
 		return dag.None{}, nil
 	}))
@@ -492,7 +491,7 @@ func TestDAGTxRunnerRollbackAndCommit(t *testing.T) {
 	ctx := context.Background()
 	pool := newPool(t, h.base, h.schema)
 
-	tr, err := dag.TxRunner[pgx.Tx](r)
+	tr, err := r.TxRunner[pgx.Tx]()
 	is.NoError(err)
 
 	def := dag.Define("it-tx").Task("t", txWorkflowArg{V: "x"})
@@ -508,7 +507,7 @@ func TestDAGTxRunnerRollbackAndCommit(t *testing.T) {
 	is.Nil(got, "a rolled-back RunTx leaves no workflow")
 
 	// Commit: the workflow lands and the scheduler runs it to completion.
-	is.NoError(dag.Register(r.Worker(), func(context.Context, txWorkflowArg) (dag.None, error) {
+	is.NoError(r.Worker().Register(func(context.Context, txWorkflowArg) (dag.None, error) {
 		return dag.None{}, nil
 	}))
 	startWorker(t, r.Worker())
@@ -545,17 +544,17 @@ func TestDAGCoexistsWithQueueAndEvent(t *testing.T) {
 	ctx := context.Background()
 
 	jobDone := make(chan struct{}, 1)
-	is.NoError(queue.Register(q.Worker(), func(context.Context, itJob) error {
+	is.NoError(q.Worker().Register(func(context.Context, itJob) error {
 		jobDone <- struct{}{}
 		return nil
 	}))
 	is.NoError(e.Publisher().Register(ctx, event.Subscription{Name: "sink", EventType: orderEvent{}.EventType(), MaxAttempts: 3}))
 	evDone := make(chan struct{}, 1)
-	is.NoError(event.RegisterFunc(e.Worker(), "sink", func(context.Context, orderEvent) error {
+	is.NoError(e.Worker().RegisterFunc("sink", func(context.Context, orderEvent) error {
 		evDone <- struct{}{}
 		return nil
 	}))
-	is.NoError(dag.Register(wf.Worker(), func(context.Context, coexistTask) (dag.None, error) {
+	is.NoError(wf.Worker().Register(func(context.Context, coexistTask) (dag.None, error) {
 		return dag.None{}, nil
 	}))
 

@@ -192,13 +192,13 @@ func TestWorkerRunsOneOperationAndCompletes(t *testing.T) {
 	r := newTestRuntime(t, f, WithLeaseTTL(time.Minute))
 
 	var calls int
-	RegisterOperation(r.Worker(), "check-status", "1", func(ctx context.Context, in checkInput) (checkOutput, error) {
+	r.Worker().RegisterOperation("check-status", "1", func(ctx context.Context, in checkInput) (checkOutput, error) {
 		calls++
 		is.Equal("abc", in.Ref)
 		is.NotEmpty(ExecutionKey(ctx))
 		return checkOutput{Status: "approved"}, nil
 	})
-	RegisterWorkflow(r.Worker(), "wf-onestep", "1", func(ctx Context, in checkInput) (checkOutput, error) {
+	r.Worker().RegisterWorkflow("wf-onestep", "1", func(ctx Context, in checkInput) (checkOutput, error) {
 		f := ExecuteOperation(ctx, "check-status", "1", in)
 		var out checkOutput
 		if err := f.Get(&out); err != nil {
@@ -241,10 +241,10 @@ func TestOperationPanicDoesNotCrashWorkerAndFlowsToFailure(t *testing.T) {
 	f := drivertest.NewFake()
 	r := newTestRuntime(t, f, WithLeaseTTL(time.Minute), WithDefaultMaxRetries(1))
 
-	RegisterOperation(r.Worker(), "boom", "1", func(context.Context, struct{}) (string, error) {
+	r.Worker().RegisterOperation("boom", "1", func(context.Context, struct{}) (string, error) {
 		panic("kaboom")
 	})
-	RegisterWorkflow(r.Worker(), "wf-panic", "1", func(ctx Context, _ struct{}) (string, error) {
+	r.Worker().RegisterWorkflow("wf-panic", "1", func(ctx Context, _ struct{}) (string, error) {
 		var out string
 		if err := ExecuteOperation(ctx, "boom", "1", struct{}{}).Get(&out); err != nil {
 			return "", err
@@ -286,10 +286,10 @@ func TestReplayErrorBacksOffThenSuspendsAfterExhaustingRetries(t *testing.T) {
 	// that confuses this test's single-job assertions.
 	r := newTestRuntime(t, f, WithLeaseTTL(time.Minute), WithDefaultMaxRetries(2), WithWorkerMode(WorkerModeWorkflowOnly))
 
-	RegisterOperation(r.Worker(), "op", "1", func(context.Context, struct{}) (string, error) {
+	r.Worker().RegisterOperation("op", "1", func(context.Context, struct{}) (string, error) {
 		return "unused", nil
 	})
-	RegisterWorkflow(r.Worker(), "wf-corrupt", "1", func(ctx Context, _ struct{}) (string, error) {
+	r.Worker().RegisterWorkflow("wf-corrupt", "1", func(ctx Context, _ struct{}) (string, error) {
 		var out string
 		if err := ExecuteOperation(ctx, "op", "1", struct{}{}).Get(&out); err != nil {
 			return "", err
@@ -352,10 +352,10 @@ func TestOperationUncertainAndResolveComplete(t *testing.T) {
 	f := drivertest.NewFake()
 	r := newTestRuntime(t, f, WithLeaseTTL(time.Minute), WithDefaultMaxRetries(1))
 
-	RegisterOperation(r.Worker(), "mutate", "1", func(_ context.Context, _ struct{}) (string, error) {
+	r.Worker().RegisterOperation("mutate", "1", func(_ context.Context, _ struct{}) (string, error) {
 		return "", fmt.Errorf("ambiguous send: %w", ErrUncertain)
 	})
-	RegisterWorkflow(r.Worker(), "wf-uncertain", "1", func(ctx Context, _ struct{}) (string, error) {
+	r.Worker().RegisterWorkflow("wf-uncertain", "1", func(ctx Context, _ struct{}) (string, error) {
 		var out string
 		if err := ExecuteOperation(ctx, "mutate", "1", struct{}{}).Get(&out); err != nil {
 			return "", err
@@ -398,7 +398,7 @@ func TestWorkerSignalDuringParkedTimerSelect(t *testing.T) {
 	f := drivertest.NewFake()
 	r := newTestRuntime(t, f, WithLeaseTTL(time.Minute))
 
-	RegisterWorkflow(r.Worker(), "wf-signal-race", "1", func(ctx Context, _ struct{}) (string, error) {
+	r.Worker().RegisterWorkflow("wf-signal-race", "1", func(ctx Context, _ struct{}) (string, error) {
 		sig := WaitSignal(ctx, "approval")
 		timeout := Sleep(ctx, time.Hour)
 		idx, err := Select(ctx, sig, timeout)
@@ -445,7 +445,7 @@ func TestWorkerFailsOnUnknownWorkflow(t *testing.T) {
 
 	// Register a workflow name so the worker dequeues its kind, but never
 	// bind a handler for the version this execution actually names.
-	RegisterWorkflow(r.Worker(), "wf-unknown", "1", func(ctx Context, in struct{}) (struct{}, error) {
+	r.Worker().RegisterWorkflow("wf-unknown", "1", func(ctx Context, in struct{}) (struct{}, error) {
 		return struct{}{}, nil
 	})
 
@@ -467,7 +467,7 @@ func TestWorkerParksOnSleepThenWakes(t *testing.T) {
 	r := newTestRuntime(t, f, WithLeaseTTL(time.Minute))
 
 	const naptime = 50 * time.Millisecond
-	RegisterWorkflow(r.Worker(), "wf-sleep", "1", func(ctx Context, _ struct{}) (struct{}, error) {
+	r.Worker().RegisterWorkflow("wf-sleep", "1", func(ctx Context, _ struct{}) (struct{}, error) {
 		_, err := Select(ctx, Sleep(ctx, naptime))
 		return struct{}{}, err
 	})

@@ -72,9 +72,9 @@
 //
 // Compose a Runtime over a shared Core with New, or standalone with Open; the
 // driver must implement the DAG capability (driver.DAGStore).
-// Register handlers with Register / RegisterKind before Worker.Start. Handlers
-// receive the decoded task arguments; task metadata travels on ctx (ID,
-// TaskKey, Attempt, ...). Execution is at-least-once — idempotency of external
+// Register handlers with Worker.Register / Worker.RegisterKind before
+// Worker.Start. Handlers receive the decoded task arguments; task metadata
+// travels on ctx (ID, TaskKey, Attempt, ...). Execution is at-least-once — idempotency of external
 // effects belongs to the handler — and every scheduler operation is set-based
 // and idempotent, so any number of worker instances can run concurrently
 // without leader election.

@@ -81,7 +81,7 @@ func TestTaskBudgetResolvesOnFirstLease(t *testing.T) {
 	r := newTestRuntime(t, f, WithDefaultMaxRetries(4))
 
 	seen := make(chan int, 2)
-	is.NoError(Register(r.Worker(), func(ctx context.Context, _ cliArgs) (None, error) {
+	is.NoError(r.Worker().Register(func(ctx context.Context, _ cliArgs) (None, error) {
 		seen <- MaxAttempts(ctx)
 		return None{}, nil
 	}))
@@ -167,7 +167,7 @@ func TestTerminalWorkflowFreesTheIdempotencyKey(t *testing.T) {
 	is := require.New(t)
 	f := drivertest.NewFake()
 	r := newTestRuntime(t, f)
-	is.NoError(Register(r.Worker(), func(context.Context, cliArgs) (None, error) { return None{}, nil }))
+	is.NoError(r.Worker().Register(func(context.Context, cliArgs) (None, error) { return None{}, nil }))
 	def := Define("free").Task("t", cliArgs{})
 
 	first, err := r.Client().Run(context.Background(), def, WithIdempotencyKey("k"))
@@ -237,7 +237,7 @@ func TestSignalDeliversPayloadAndDownstreamReadsIt(t *testing.T) {
 		By string `json:"by"`
 	}
 	got := make(chan string, 1)
-	is.NoError(Register(r.Worker(), func(ctx context.Context, _ cliArgs) (None, error) {
+	is.NoError(r.Worker().Register(func(ctx context.Context, _ cliArgs) (None, error) {
 		a, err := ResultOf[approval](ctx, "approved")
 		if err != nil {
 			return None{}, err
@@ -284,7 +284,7 @@ func TestSignalBeforeWaitIsBufferedAndDelivered(t *testing.T) {
 	r := newTestRuntime(t, f)
 
 	gate := make(chan struct{})
-	is.NoError(Register(r.Worker(), func(context.Context, cliArgs) (None, error) {
+	is.NoError(r.Worker().Register(func(context.Context, cliArgs) (None, error) {
 		<-gate
 		return None{}, nil
 	}))
@@ -342,7 +342,7 @@ func TestSignalTerminalDAGReturnsNotFound(t *testing.T) {
 	f := drivertest.NewFake()
 	r := newTestRuntime(t, f)
 
-	is.NoError(Register(r.Worker(), func(context.Context, cliArgs) (None, error) {
+	is.NoError(r.Worker().Register(func(context.Context, cliArgs) (None, error) {
 		return None{}, nil
 	}))
 	res, err := r.Client().Run(context.Background(), Define("term").Task("t", cliArgs{}))
@@ -377,7 +377,7 @@ func TestTxRunnerRequiresTxDAGStore(t *testing.T) {
 	is := require.New(t)
 	r := newTestRuntime(t, drivertest.NewFake()) // no TxDAGStore
 
-	_, err := TxRunner[struct{}](r)
+	_, err := r.TxRunner[struct{}]()
 	is.Error(err)
 	is.Contains(err.Error(), "does not support transactional workflow creation")
 	is.Contains(err.Error(), "struct {}")
@@ -392,7 +392,7 @@ func TestTxRunnerCreatesThroughTx(t *testing.T) {
 	r, err := New(core, fastOptions()...)
 	is.NoError(err)
 
-	tr, err := TxRunner[struct{}](r)
+	tr, err := r.TxRunner[struct{}]()
 	is.NoError(err)
 
 	res, err := tr.RunTx(context.Background(), struct{}{},

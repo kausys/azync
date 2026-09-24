@@ -36,7 +36,7 @@ res, err := d.Client().Run(ctx, def, dag.WithIdempotencyKey(key))
 Register typed handlers (optional result type; use `dag.None` when there is none):
 
 ```go
-dag.Register(d.Worker(), func(ctx context.Context, c CreateAccount) (Account, error) {
+d.Worker().Register(func(ctx context.Context, c CreateAccount) (Account, error) {
     return Account{ID: "acct_1"}, nil
 })
 
@@ -106,7 +106,7 @@ Sleep and WaitSignal both use the node **key** as the signal name.
 ## Transactional run
 
 ```go
-txc, err := dag.TxRunner[pgx.Tx](d) // needs driver.TxDAGStore
+txc, err := d.TxRunner[pgx.Tx]() // needs driver.TxDAGStore
 res, err := txc.RunTx(ctx, tx, def, dag.WithIdempotencyKey(key))
 ```
 

@@ -97,31 +97,31 @@ func run() error {
 		return fmt.Errorf("new workflow runtime: %w", err)
 	}
 
-	if err := queue.Register(q.Worker(), func(_ context.Context, job sendReceipt) error {
+	if err := q.Worker().Register(func(_ context.Context, job sendReceipt) error {
 		slog.Info("sending receipt", "order_id", job.OrderID)
 		return nil
 	}); err != nil {
 		return fmt.Errorf("register queue: %w", err)
 	}
 
-	if err := event.RegisterFunc(ev.Worker(), projector, func(ctx context.Context, order orderPlaced) error {
+	if err := ev.Worker().RegisterFunc(projector, func(ctx context.Context, order orderPlaced) error {
 		_, err := q.Producer().Enqueue(ctx, sendReceipt(order))
 		return err
 	}); err != nil {
 		return fmt.Errorf("register projector: %w", err)
 	}
 
-	if err := dag.Register(d.Worker(), func(ctx context.Context, t stampTask) (dag.None, error) {
+	if err := d.Worker().Register(func(ctx context.Context, t stampTask) (dag.None, error) {
 		slog.Info("dag stamp", "label", t.Label, "dag_id", dag.ID(ctx))
 		return dag.None{}, nil
 	}); err != nil {
 		return fmt.Errorf("register dag: %w", err)
 	}
 
-	workflow.RegisterOperation(wf.Worker(), "ping", "1", func(_ context.Context, _ struct{}) (string, error) {
+	wf.Worker().RegisterOperation("ping", "1", func(_ context.Context, _ struct{}) (string, error) {
 		return "pong", nil
 	})
-	workflow.RegisterWorkflow(wf.Worker(), "shared-ping", "1", func(ctx workflow.Context, _ struct{}) (string, error) {
+	wf.Worker().RegisterWorkflow("shared-ping", "1", func(ctx workflow.Context, _ struct{}) (string, error) {
 		var out string
 		if err := workflow.ExecuteOperation(ctx, "ping", "1", struct{}{}).Get(&out); err != nil {
 			return "", err

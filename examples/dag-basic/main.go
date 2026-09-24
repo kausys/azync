@@ -213,7 +213,7 @@ func run() error {
 func registerHandlers(r *dag.Runtime, prov *provider) error {
 	w := r.Worker()
 
-	if err := dag.Register(w, func(ctx context.Context, c createAccount) (account, error) {
+	if err := w.Register(func(ctx context.Context, c createAccount) (account, error) {
 		id := "acct_" + businessID
 		logTask(ctx, "creating provider account", "email", c.Email, "account_id", id)
 		return account{ID: id}, nil
@@ -223,14 +223,14 @@ func registerHandlers(r *dag.Runtime, prov *provider) error {
 
 	// The compensation handler — declared for completeness; unused on the happy
 	// path. It would run in reverse completion order if a later task died.
-	if err := dag.Register(w, func(ctx context.Context, d deleteAccount) (dag.None, error) {
+	if err := w.Register(func(ctx context.Context, d deleteAccount) (dag.None, error) {
 		logTask(ctx, "compensating: deleting provider account", "email", d.Email)
 		return dag.None{}, nil
 	}); err != nil {
 		return fmt.Errorf("register delete-account: %w", err)
 	}
 
-	if err := dag.Register(w, func(ctx context.Context, _ verifyStatus) (dag.None, error) {
+	if err := w.Register(func(ctx context.Context, _ verifyStatus) (dag.None, error) {
 		acct, err := dag.ResultOf[account](ctx, "create-account")
 		if err != nil {
 			return dag.None{}, err
@@ -249,7 +249,7 @@ func registerHandlers(r *dag.Runtime, prov *provider) error {
 		return fmt.Errorf("register verify-status: %w", err)
 	}
 
-	if err := dag.Register(w, func(ctx context.Context, _ provision) (dag.None, error) {
+	if err := w.Register(func(ctx context.Context, _ provision) (dag.None, error) {
 		appr, err := dag.ResultOf[approval](ctx, "await-approval")
 		if err != nil {
 			return dag.None{}, err
@@ -260,7 +260,7 @@ func registerHandlers(r *dag.Runtime, prov *provider) error {
 		return fmt.Errorf("register provision: %w", err)
 	}
 
-	if err := dag.Register(w, func(ctx context.Context, _ notify) (dag.None, error) {
+	if err := w.Register(func(ctx context.Context, _ notify) (dag.None, error) {
 		appr, err := dag.ResultOf[approval](ctx, "await-approval")
 		if err != nil {
 			return dag.None{}, err
@@ -276,7 +276,7 @@ func registerHandlers(r *dag.Runtime, prov *provider) error {
 	// though the task itself runs at-least-once, and even if several upstream
 	// dags raced to this point sharing the same key.
 	celebrateDef := dag.Define("celebrate").Task("cheer", celebrate{Business: businessID})
-	if err := dag.Register(w, func(ctx context.Context, _ finalize) (dag.None, error) {
+	if err := w.Register(func(ctx context.Context, _ finalize) (dag.None, error) {
 		res, err := r.Client().Run(ctx, celebrateDef, dag.WithIdempotencyKey("celebrate-"+businessID))
 		if err != nil {
 			return dag.None{}, err
@@ -291,7 +291,7 @@ func registerHandlers(r *dag.Runtime, prov *provider) error {
 		return fmt.Errorf("register finalize: %w", err)
 	}
 
-	if err := dag.Register(w, func(ctx context.Context, c celebrate) (dag.None, error) {
+	if err := w.Register(func(ctx context.Context, c celebrate) (dag.None, error) {
 		logTask(ctx, "celebrating onboarding", "business", c.Business)
 		return dag.None{}, nil
 	}); err != nil {

@@ -133,7 +133,7 @@ func (p *Producer) makeParams(ctx context.Context, args JobArgs, opts ...Enqueue
 
 // TxProducerClient enqueues jobs inside the caller's own backend transaction,
 // so the enqueue commits atomically with the caller's writes (outbox pattern).
-// Build one with TxProducer.
+// Build one with [Runtime.TxProducer].
 type TxProducerClient[TTx any] struct {
 	store    driver.TxStore[TTx]
 	producer *Producer
@@ -143,7 +143,7 @@ type TxProducerClient[TTx any] struct {
 // transaction handle type TTx (e.g. pgx.Tx for the pg driver). It fails
 // immediately when the runtime's driver does not support transactional
 // enqueues for that type.
-func TxProducer[TTx any](r *Runtime) (*TxProducerClient[TTx], error) {
+func (r *Runtime) TxProducer[TTx any]() (*TxProducerClient[TTx], error) {
 	store := r.core.Store()
 	ts, ok := store.(driver.TxStore[TTx])
 	if !ok {

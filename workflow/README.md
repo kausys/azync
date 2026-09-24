@@ -34,7 +34,7 @@ Requires `driver.WorkflowStore` (+ Core). Migrations: `00003_workflows.sql`, `00
 
 ## Public surface (summary)
 
-- `RegisterWorkflow` / `RegisterOperation`
+- `Worker.RegisterWorkflow` / `Worker.RegisterOperation`
 - `Client.Start`, `Client.Signal`
 - `ExecuteOperation`, `Sleep`, `WaitSignal`, `Select`
 - `Manager.Get` / `Cancel` / `ResolveUncertain`

@@ -131,7 +131,7 @@ func WithMeta(key, value string) PublishOption {
 
 // TxPublisherClient publishes events inside the caller's own backend
 // transaction, so the append and its delivery fan-out commit atomically with
-// the caller's writes (outbox pattern). Build one with TxPublisher.
+// the caller's writes (outbox pattern). Build one with [Runtime.TxPublisher].
 type TxPublisherClient[TTx any] struct {
 	store     driver.TxStore[TTx]
 	publisher *Publisher
@@ -141,7 +141,7 @@ type TxPublisherClient[TTx any] struct {
 // transaction handle type TTx (e.g. pgx.Tx for the pg driver). It fails
 // immediately when the runtime's driver does not support transactional
 // publishes for that type.
-func TxPublisher[TTx any](r *Runtime) (*TxPublisherClient[TTx], error) {
+func (r *Runtime) TxPublisher[TTx any]() (*TxPublisherClient[TTx], error) {
 	store := r.core.Store()
 	ts, ok := store.(driver.TxStore[TTx])
 	if !ok {

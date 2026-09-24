@@ -21,11 +21,11 @@ func TestCrashAfterOperationScheduledRecovers(t *testing.T) {
 	r := newTestRuntime(t, f, WithLeaseTTL(time.Minute))
 
 	var calls int
-	RegisterOperation(r.Worker(), "step", "1", func(_ context.Context, _ struct{}) (string, error) {
+	r.Worker().RegisterOperation("step", "1", func(_ context.Context, _ struct{}) (string, error) {
 		calls++
 		return "done", nil
 	})
-	RegisterWorkflow(r.Worker(), "wf-crash", "1", func(ctx Context, _ struct{}) (string, error) {
+	r.Worker().RegisterWorkflow("wf-crash", "1", func(ctx Context, _ struct{}) (string, error) {
 		var out string
 		if err := ExecuteOperation(ctx, "step", "1", struct{}{}).Get(&out); err != nil {
 			return "", err
@@ -62,14 +62,14 @@ func TestOperationRetryThenSucceed(t *testing.T) {
 	)
 
 	var calls int
-	RegisterOperation(r.Worker(), "flaky", "1", func(_ context.Context, _ struct{}) (string, error) {
+	r.Worker().RegisterOperation("flaky", "1", func(_ context.Context, _ struct{}) (string, error) {
 		calls++
 		if calls < 2 {
 			return "", stringError("transient")
 		}
 		return "ok", nil
 	})
-	RegisterWorkflow(r.Worker(), "wf-retry", "1", func(ctx Context, _ struct{}) (string, error) {
+	r.Worker().RegisterWorkflow("wf-retry", "1", func(ctx Context, _ struct{}) (string, error) {
 		var out string
 		if err := ExecuteOperation(ctx, "flaky", "1", struct{}{}).Get(&out); err != nil {
 			return "", err

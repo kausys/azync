@@ -78,7 +78,7 @@ func WithMaxAttempts(n int) RegisterOption {
 // inferred from fn. It fails on an empty name, a duplicate subscriber, or a call
 // after Start. Like Register, it upserts the durable (name, T.EventType())
 // subscription in Start (see Worker.Register for the durability caveat).
-func RegisterFunc[T EventArgs](w *Worker, name string, fn func(ctx context.Context, evt T) error, opts ...RegisterOption) error {
+func (w *Worker) RegisterFunc[T EventArgs](name string, fn func(ctx context.Context, evt T) error, opts ...RegisterOption) error {
 	o := registerOptions{}
 	for _, opt := range opts {
 		opt(&o)

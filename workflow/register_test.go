@@ -19,18 +19,18 @@ func TestRegisterWorkflowDuplicatePanics(t *testing.T) {
 	f := drivertest.NewFake()
 	r := newTestRuntime(t, f)
 
-	RegisterWorkflow(r.Worker(), "wf-dup", "1", func(Context, struct{}) (string, error) {
+	r.Worker().RegisterWorkflow("wf-dup", "1", func(Context, struct{}) (string, error) {
 		return "a", nil
 	})
 	is.Panics(func() {
-		RegisterWorkflow(r.Worker(), "wf-dup", "1", func(Context, struct{}) (string, error) {
+		r.Worker().RegisterWorkflow("wf-dup", "1", func(Context, struct{}) (string, error) {
 			return "b", nil
 		})
 	})
 
 	// A different version is a distinct registration, not a duplicate.
 	is.NotPanics(func() {
-		RegisterWorkflow(r.Worker(), "wf-dup", "2", func(Context, struct{}) (string, error) {
+		r.Worker().RegisterWorkflow("wf-dup", "2", func(Context, struct{}) (string, error) {
 			return "b", nil
 		})
 	})
@@ -43,17 +43,17 @@ func TestRegisterOperationDuplicatePanics(t *testing.T) {
 	f := drivertest.NewFake()
 	r := newTestRuntime(t, f)
 
-	RegisterOperation(r.Worker(), "op-dup", "1", func(context.Context, struct{}) (string, error) {
+	r.Worker().RegisterOperation("op-dup", "1", func(context.Context, struct{}) (string, error) {
 		return "a", nil
 	})
 	is.Panics(func() {
-		RegisterOperation(r.Worker(), "op-dup", "1", func(context.Context, struct{}) (string, error) {
+		r.Worker().RegisterOperation("op-dup", "1", func(context.Context, struct{}) (string, error) {
 			return "b", nil
 		})
 	})
 
 	is.NotPanics(func() {
-		RegisterOperation(r.Worker(), "op-dup", "2", func(context.Context, struct{}) (string, error) {
+		r.Worker().RegisterOperation("op-dup", "2", func(context.Context, struct{}) (string, error) {
 			return "b", nil
 		})
 	})

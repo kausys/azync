@@ -266,7 +266,7 @@ func TestWithCronFalseRunsWithoutLeaderElector(t *testing.T) {
 	is.NoError(err)
 
 	done := make(chan struct{}, 1)
-	is.NoError(Register(r.Worker(), func(context.Context, testArgs) error {
+	is.NoError(r.Worker().Register(func(context.Context, testArgs) error {
 		done <- struct{}{}
 		return nil
 	}))

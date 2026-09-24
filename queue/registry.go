@@ -54,7 +54,7 @@ func WithJobTimeout(d time.Duration) RegisterOption {
 // dynamic kinds, where the handler receives the undecoded JSON payload and reads
 // its metadata from ctx (JobID, Kind, Attempt, ...). Same rules as Register: it
 // fails on duplicate kinds (typed or raw) and after Start.
-func RegisterKind(w *Worker, kind string, handler func(ctx context.Context, payload json.RawMessage) error, opts ...RegisterOption) error {
+func (w *Worker) RegisterKind(kind string, handler func(ctx context.Context, payload json.RawMessage) error, opts ...RegisterOption) error {
 	o := registerOptions{
 		concurrency: w.cfg.DefaultConcurrency,
 		maxRetries:  w.cfg.DefaultMaxAttempts,
@@ -88,11 +88,11 @@ func RegisterKind(w *Worker, kind string, handler func(ctx context.Context, payl
 // domain value. Job metadata travels on ctx (JobID, Attempt, IsRetry, ...). It
 // fails on duplicate kinds and after Start — registration happens in the
 // composition root, before the worker runs.
-func Register[T JobArgs](w *Worker, handler func(ctx context.Context, args T) error, opts ...RegisterOption) error {
+func (w *Worker) Register[T JobArgs](handler func(ctx context.Context, args T) error, opts ...RegisterOption) error {
 	var zero T
 	kind := zero.Kind()
 
-	return RegisterKind(w, kind, func(ctx context.Context, payload json.RawMessage) error {
+	return w.RegisterKind(kind, func(ctx context.Context, payload json.RawMessage) error {
 		var args T
 		if err := json.Unmarshal(payload, &args); err != nil {
 			// A payload that cannot decode will never decode — retrying is futile.
