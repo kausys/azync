@@ -85,30 +85,35 @@ const (
 // SourceQueue). Scheduling resolves against the backend clock: when RunAt is
 // set it wins; otherwise the backend computes its own now()+Delay so a client
 // clock skewed against the database can never hide a job from dequeue.
+//
+// Its JSON form is part of the contract: the keys are fixed by the field tags,
+// and decoding what was encoded yields an equal value (a nil payload stays nil,
+// a zero time stays zero). A value can therefore be persisted and handed to a
+// driver later, as an outbox does.
 type EnqueueParams struct {
 	// ID is the caller-assigned primary key; drivers must not overwrite it.
-	ID uuid.UUID
+	ID uuid.UUID `json:"id"`
 	// Kind names the job type and selects the fetch partition.
-	Kind string
+	Kind string `json:"kind"`
 	// Payload is the opaque handler argument, stored verbatim. Required for
 	// queue jobs (never nil).
-	Payload json.RawMessage
+	Payload json.RawMessage `json:"payload,omitempty"`
 	// Meta carries string-valued annotations propagated to the handler.
-	Meta map[string]string
+	Meta map[string]string `json:"meta,omitempty"`
 	// RunAt is an absolute schedule (from At). Zero delegates to now()+Delay.
-	RunAt time.Time
+	RunAt time.Time `json:"runAt,omitzero"`
 	// Delay is a relative schedule resolved against the backend clock; used only
 	// when RunAt is zero.
-	Delay time.Duration
+	Delay time.Duration `json:"delay,omitempty"`
 	// MaxAttempts is the retry budget. It is durable only when
 	// MaxAttemptsExplicit is true; otherwise the first lease may replace it with
 	// the runtime default (see DequeueParams.DefaultMaxAttempts).
-	MaxAttempts int
+	MaxAttempts int `json:"maxAttempts,omitempty"`
 	// MaxAttemptsExplicit records that the caller set MaxAttempts deliberately,
 	// pinning it against divergent runtime defaults on the first lease.
-	MaxAttemptsExplicit bool
+	MaxAttemptsExplicit bool `json:"maxAttemptsExplicit,omitempty"`
 	// IdempotencyKey deduplicates within (Source, Kind). Empty disables dedupe.
-	IdempotencyKey string
+	IdempotencyKey string `json:"idempotencyKey,omitempty"`
 	// IdempotencyTTL extends the dedupe window: the live-job uniqueness check
 	// (a duplicate is rejected only while a prior job with the key is still
 	// alive) always applies. Setting IdempotencyTTL greater than zero ADDS a
@@ -116,28 +121,33 @@ type EnqueueParams struct {
 	// key rejected for the given duration regardless of the prior job's state
 	// (including after it settles to succeeded or dead). Zero relies on the
 	// live-job check alone.
-	IdempotencyTTL time.Duration
+	IdempotencyTTL time.Duration `json:"idempotencyTtl,omitempty"`
 }
 
 // PublishParams is the input for a single event appended to the ledger. Publish
 // atomically writes this row and fans out one pending delivery job per matching
 // subscriber.
+//
+// Its JSON form is part of the contract: the keys are fixed by the field tags,
+// and decoding what was encoded yields an equal value (a nil payload stays nil,
+// a zero time stays zero). A value can therefore be persisted and handed to a
+// driver later, as an outbox does.
 type PublishParams struct {
 	// ID is the caller-assigned ledger primary key.
-	ID uuid.UUID
+	ID uuid.UUID `json:"id"`
 	// Type is the event type; subscribers registered for it receive a delivery.
-	Type string
+	Type string `json:"type"`
 	// AggregateType and AggregateID identify the source aggregate, if any.
-	AggregateType string
-	AggregateID   string
+	AggregateType string `json:"aggregateType,omitempty"`
+	AggregateID   string `json:"aggregateId,omitempty"`
 	// Version is the aggregate version this event advances to.
-	Version int64
+	Version int64 `json:"version,omitempty"`
 	// OccurredAt is the domain time the event happened.
-	OccurredAt time.Time
+	OccurredAt time.Time `json:"occurredAt,omitzero"`
 	// Payload is the opaque event body, stored verbatim.
-	Payload json.RawMessage
+	Payload json.RawMessage `json:"payload,omitempty"`
 	// Meta carries string-valued annotations.
-	Meta map[string]string
+	Meta map[string]string `json:"meta,omitempty"`
 }
 
 // DequeueParams controls a single DequeueBatch claim within one (Source, Kind)

@@ -77,53 +77,58 @@ const (
 
 // DAGParams is the durable input for one workflow: its header plus the
 // full static DAG (tasks and dependency edges) declared at creation time.
+//
+// Its JSON form is part of the contract: the keys are fixed by the field tags,
+// and decoding what was encoded yields an equal value (a nil payload stays nil,
+// a zero time stays zero). A value can therefore be persisted and handed to a
+// driver later, as an outbox does.
 type DAGParams struct {
 	// ID is the caller-assigned primary key; drivers must not overwrite it.
-	ID uuid.UUID
+	ID uuid.UUID `json:"id"`
 	// Name is the workflow definition name; dedupe scopes to it.
-	Name string
+	Name string `json:"name"`
 	// OnFailure is the declared failure policy. Drivers treat an empty value
 	// as OnFailureCancel.
-	OnFailure OnFailurePolicy
+	OnFailure OnFailurePolicy `json:"onFailure,omitempty"`
 	// IdempotencyKey deduplicates within Name across live (running, suspended
 	// or compensating) executions. Empty disables dedupe; a terminal workflow
 	// frees the key.
-	IdempotencyKey string
+	IdempotencyKey string `json:"idempotencyKey,omitempty"`
 	// Meta carries string-valued annotations, propagated onto every task job.
-	Meta map[string]string
+	Meta map[string]string `json:"meta,omitempty"`
 	// Tasks is the static task set. Task keys must be unique within the
 	// workflow.
-	Tasks []DAGTask
+	Tasks []DAGTask `json:"tasks,omitempty"`
 	// Deps are the DAG edges: each entry blocks TaskKey until DependsOnKey
 	// succeeded.
-	Deps []DAGDep
+	Deps []DAGDep `json:"deps,omitempty"`
 }
 
 // DAGTask is one declared task of a workflow DAG.
 type DAGTask struct {
 	// Key identifies the task within its workflow (unique, caller-validated
 	// against the reserved "$" and "comp:" prefixes).
-	Key string
+	Key string `json:"key"`
 	// Kind is the handler kind, or an internal kind (KindSleep, KindSignal).
-	Kind string
+	Kind string `json:"kind"`
 	// Payload is the opaque handler argument.
-	Payload json.RawMessage
+	Payload json.RawMessage `json:"payload,omitempty"`
 	// MaxAttempts is the retry budget. Zero defers to the runtime default,
 	// resolved durably on the first lease.
-	MaxAttempts int
+	MaxAttempts int `json:"maxAttempts,omitempty"`
 	// CompensationKind, when set, declares a compensation for this task: on a
 	// compensating workflow a "comp:<Key>" task of this kind is inserted with
 	// CompensationPayload once this task succeeded.
-	CompensationKind    string
-	CompensationPayload json.RawMessage
+	CompensationKind    string          `json:"compensationKind,omitempty"`
+	CompensationPayload json.RawMessage `json:"compensationPayload,omitempty"`
 	// SignalName names the signal this task reacts to: a KindSignal task
 	// completes on it, a KindSleep task is woken early by it. Empty for tasks
 	// that ignore signals.
-	SignalName string
+	SignalName string `json:"signalName,omitempty"`
 	// SleepFor is the KindSleep duration, resolved against the backend clock
 	// when the timer starts (at creation for a root task, at promotion
 	// otherwise).
-	SleepFor time.Duration
+	SleepFor time.Duration `json:"sleepFor,omitempty"`
 	// IgnoreDeadDeps lets this task be promoted even when a dependency ended
 	// dead or cancelled, treating those dependencies as satisfied. It also
 	// exempts a dead dependency from the failure policy when every dependent of
@@ -132,7 +137,7 @@ type DAGTask struct {
 	// exemption is never vacuous — a dead task with no dependents (a leaf)
 	// always triggers the policy — and a workflow that runs to completion with
 	// any dead task still settles failed, not succeeded (see CompleteDAGs).
-	IgnoreDeadDeps bool
+	IgnoreDeadDeps bool `json:"ignoreDeadDeps,omitempty"`
 	// Deadline, when positive, bounds the task's snooze/NotReady loop: the
 	// driver persists it as the job's snooze budget, and the FIRST Snooze
 	// stamps deadline_at = now()+Deadline on the backend clock — the budget
@@ -142,13 +147,13 @@ type DAGTask struct {
 	// the task can snooze forever. Compensation tasks never inherit it, and
 	// RetryDAG clears the stamped deadline so a retried task waits with a
 	// fresh budget.
-	Deadline time.Duration
+	Deadline time.Duration `json:"deadline,omitempty"`
 }
 
 // DAGDep is one DAG edge: TaskKey waits for DependsOnKey.
 type DAGDep struct {
-	TaskKey      string
-	DependsOnKey string
+	TaskKey      string `json:"taskKey"`
+	DependsOnKey string `json:"dependsOnKey"`
 }
 
 // TaskResult is one settled task outcome as returned by TaskResults: either
