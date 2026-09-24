@@ -122,6 +122,13 @@ If a release PR appears with the wrong version, land another commit on `main`
 carrying the right `Release-As:`; release-please rebuilds the PR from it. The
 tag is only cut when that PR merges, so nothing is published in the meantime.
 
+**Merge pull requests with a merge commit, never a squash.** release-please
+reads the commits that land on `main`. A squash replaces a branch's commits
+with one whose message is whatever the merge dialog holds — often only the
+pull request title — so the `Release-As:` and `BREAKING CHANGE:` footers the
+branch carried never reach `main`, and a `feat!:` title alone reads as a
+major. That is how 0.0.9 was first proposed as 1.0.0.
+
 ## License
 
 [MIT](LICENSE)
