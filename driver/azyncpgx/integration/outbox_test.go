@@ -209,7 +209,9 @@ func TestOutboxDrainForwardsEachKindAsItWasBuilt(t *testing.T) {
 	is.NotNil(forwarded)
 	is.JSONEq(`{"amount":7}`, string(forwarded.Payload))
 	is.Equal("outbox", forwarded.Meta["origin"])
-	is.True(forwarded.OccurredAt.Equal(captured.OccurredAt), "the time it was built, not the time it was drained")
+	// The time it was built, not the time it was drained — at the microsecond
+	// precision the ledger stores, which a direct publish truncates to as well.
+	is.Equal(captured.OccurredAt.Truncate(time.Microsecond), forwarded.OccurredAt.UTC())
 	stats, err := e.Manager().Stats(ctx)
 	is.NoError(err)
 	is.EqualValues(1, stats.Pending, "fanned out on forwarding")
