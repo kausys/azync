@@ -1,5 +1,18 @@
 # Changelog
 
+## [0.0.10](https://github.com/kausys/azync/compare/v0.0.9...v0.0.10) (2026-09-24)
+
+
+### Features
+
+* outbox for writes committed in another database ([#19](https://github.com/kausys/azync/issues/19)) ([ac89d2b](https://github.com/kausys/azync/commit/ac89d2bb60119d9a1a54706b9c6557dac3fed484))
+
+
+### Miscellaneous
+
+* bump the patch for a feat on 0.0.x ([#22](https://github.com/kausys/azync/issues/22)) ([e66a644](https://github.com/kausys/azync/commit/e66a644f03bb858f99b10ce054576c0d8630a9ec))
+* pin this cycle to 0.0.10 ([#21](https://github.com/kausys/azync/issues/21)) ([b25b922](https://github.com/kausys/azync/commit/b25b922930d0c734c8ad6196e7aa1391a2e6c1c1))
+
 ## [0.0.9](https://github.com/kausys/azync/compare/v0.0.8...v0.0.9) (2026-09-24)
 
 
