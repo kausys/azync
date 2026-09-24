@@ -114,14 +114,14 @@ Release-As: 0.0.8
 
 `bump-minor-pre-major` is not set in `release-please-config.json` and its
 default is `false`, so release-please reads any breaking change on a `0.x` line
-as `1.0.0`. `Release-As:` is what pins it.
-
-**The same holds for a plain `feat:`.** `bump-patch-for-minor-pre-major` is not
-set either, so a feature on `0.0.x` is proposed as `0.1.0`. Pin every cycle
-that adds one — once, on its first `feat:` commit — as 0.0.8 did. The API is still moving and nearly
+as `1.0.0`. `Release-As:` is what pins it. The API is still moving and nearly
 every release so far has been breaking, so the footer is the norm here, not an
 exception — and omitting it does not fail anything, it silently proposes a
 major.
+
+A plain `feat:` needs no footer: `bump-patch-for-minor-pre-major` is set, so a
+feature on `0.0.x` bumps the patch (`0.0.9` → `0.0.10`). Only a breaking change
+still has to be pinned.
 
 If a release PR appears with the wrong version, land another commit on `main`
 carrying the right `Release-As:`; release-please rebuilds the PR from it. The
