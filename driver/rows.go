@@ -123,6 +123,14 @@ type EnqueueParams struct {
 	// (including after it settles to succeeded or dead). Zero relies on the
 	// live-job check alone.
 	IdempotencyTTL time.Duration `json:"idempotencyTtl,omitempty"`
+	// CoalesceKey drops this enqueue when a job of the same Kind and key has
+	// not started yet (pending or scheduled): that job will run, and it will
+	// see whatever this one would have. A job already running never absorbs
+	// it, so a signal arriving mid-run is never lost. Concurrent enqueues may
+	// both insert — a redundant run, never a missed one. Coalesced enqueues
+	// must be interchangeable: the dropped one's payload is discarded. Empty
+	// disables it. Not combined with IdempotencyKey.
+	CoalesceKey string `json:"coalesceKey,omitempty"`
 }
 
 // PublishParams is the input for a single event appended to the ledger. Publish

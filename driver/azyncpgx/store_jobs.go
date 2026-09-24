@@ -86,12 +86,16 @@ RETURNING kind`
 const enqueueInsertSQL = `
 INSERT INTO azync_jobs
 	(id, source, kind, state, run_at, max_attempts, max_attempts_explicit, payload, meta,
-	 idempotency_key, enqueued_at)
+	 idempotency_key, enqueued_at, coalesce_key)
 SELECT $1, 'queue', $2,
 	CASE WHEN r.run_at > now() THEN 'scheduled' ELSE 'pending' END,
 	r.run_at, $3, $4, $5::jsonb, $6::jsonb,
-	$7, now()
+	$7, now(), $10
 FROM (SELECT COALESCE($8::timestamptz, now() + make_interval(secs => $9)) AS run_at) r
+WHERE $10::text IS NULL OR NOT EXISTS (
+	SELECT 1 FROM azync_jobs c
+	WHERE c.source = 'queue' AND c.kind = $2 AND c.coalesce_key = $10
+		AND c.state IN ('pending', 'scheduled'))
 ON CONFLICT (source, kind, idempotency_key)
 	WHERE idempotency_key IS NOT NULL AND state <> ALL (ARRAY['dead'::text, 'succeeded'::text])
 DO NOTHING
@@ -151,19 +155,22 @@ func (s *Store) enqueue(ctx context.Context, q querier, p driver.EnqueueParams, 
 		}
 	}
 
-	var idem any
+	var idem, coalesce any
 	if p.IdempotencyKey != "" {
 		idem = p.IdempotencyKey
+	}
+	if p.CoalesceKey != "" {
+		coalesce = p.CoalesceKey
 	}
 
 	var id pgtype.UUID
 	err = q.QueryRow(ctx, enqueueInsertSQL,
 		p.ID, p.Kind, p.MaxAttempts, p.MaxAttemptsExplicit,
 		string(p.Payload), string(metaJSON), idem,
-		nullableTime(p.RunAt), p.Delay.Seconds(),
+		nullableTime(p.RunAt), p.Delay.Seconds(), coalesce,
 	).Scan(&id)
 	if errors.Is(err, pgx.ErrNoRows) {
-		return false, nil // deduplicated by the live-job unique index
+		return false, nil // deduplicated by the live-job unique index, or coalesced
 	}
 	if err != nil {
 		return false, fmt.Errorf("azyncpgx: enqueue insert: %w", alreadyExists(err, "azync_jobs_pkey"))

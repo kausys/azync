@@ -259,3 +259,25 @@ func TestTxProducerViaRefusesANilStore(t *testing.T) {
 	_, err := r.TxProducerVia[struct{}](nil)
 	require.ErrorContains(t, err, "store is nil")
 }
+
+func TestCoalesceKeyDropsAnEnqueueWhileOneIsWaiting(t *testing.T) {
+	t.Parallel()
+	is := require.New(t)
+	r := newTestRuntime(t, drivertest.NewFake())
+	ctx := context.Background()
+
+	first, err := r.Producer().Enqueue(ctx, testArgs{Value: "a"}, CoalesceKey("drain"))
+	is.NoError(err)
+	second, err := r.Producer().Enqueue(ctx, testArgs{Value: "b"}, CoalesceKey("drain"))
+	is.NoError(err)
+
+	is.False(first.Deduplicated)
+	is.True(second.Deduplicated, "the waiting job absorbs it")
+}
+
+func TestCoalesceKeyCannotBeCombinedWithIdempotencyKey(t *testing.T) {
+	t.Parallel()
+	r := newTestRuntime(t, drivertest.NewFake())
+	_, err := r.Producer().Enqueue(context.Background(), testArgs{Value: "a"}, CoalesceKey("c"), IdempotencyKey("i"))
+	require.ErrorContains(t, err, "cannot be combined")
+}

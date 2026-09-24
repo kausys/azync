@@ -70,6 +70,7 @@ go func() {
 | `queue.At(t)` | Run at time (wins over Delay) |
 | `queue.IdempotencyKey(k)` | Dedupe while a live job with key exists |
 | `queue.IdempotencyKeyTTL(k, window)` | Dedupe window |
+| `queue.CoalesceKey(k)` | Drop while a job of the same kind and key has not started; never while one is running |
 | `queue.MaxRetries(n)` | Per-enqueue retry budget |
 | `queue.Meta(key, value)` | Opaque metadata on the job |
 

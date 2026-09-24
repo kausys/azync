@@ -48,6 +48,7 @@ func fullEnqueue() driver.EnqueueParams {
 		MaxAttemptsExplicit: true,
 		IdempotencyKey:      "idem",
 		IdempotencyTTL:      time.Hour,
+		CoalesceKey:         "drain",
 	}
 }
 
@@ -110,7 +111,7 @@ func TestParamsJSONKeysAreFixed(t *testing.T) {
 			`"payload":{"total":42},"meta":{"traceparent":"00-abc-def-01"}}`},
 		{"enqueue", fullEnqueue(), `{"id":"0192a1b2-c3d4-7e5f-8a9b-0c1d2e3f4a5b","kind":"email.send",` +
 			`"payload":{"to":"a@b.c"},"meta":{"k":"v"},"runAt":"2026-09-24T13:30:00.123456789Z","delay":60000000000,` +
-			`"maxAttempts":5,"maxAttemptsExplicit":true,"idempotencyKey":"idem","idempotencyTtl":3600000000000}`},
+			`"maxAttempts":5,"maxAttemptsExplicit":true,"idempotencyKey":"idem","idempotencyTtl":3600000000000,"coalesceKey":"drain"}`},
 		{"dag", fullDAG(), `{"id":"0192a1b2-c3d4-7e5f-8a9b-0c1d2e3f4a5b","name":"onboarding","onFailure":"suspend",` +
 			`"idempotencyKey":"once","meta":{"k":"v"},"tasks":[{"key":"charge","kind":"billing.charge",` +
 			`"payload":{"amount":1},"maxAttempts":3,"compensationKind":"billing.refund",` +

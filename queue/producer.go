@@ -28,7 +28,7 @@ type Producer struct {
 // EnqueueResult reports the outcome of an Enqueue.
 type EnqueueResult struct {
 	ID           uuid.UUID
-	Deduplicated bool // dropped by an idempotency key
+	Deduplicated bool // dropped by an idempotency key or a coalesce key
 }
 
 type enqueueOptions struct {
@@ -36,6 +36,7 @@ type enqueueOptions struct {
 	runAt              time.Time // zero = not set (Delay applies)
 	idemKey            string
 	idemTTL            time.Duration
+	coalesceKey        string
 	maxRetries         int
 	maxRetriesExplicit bool
 	meta               map[string]string
@@ -64,6 +65,17 @@ func IdempotencyKey(k string) EnqueueOption {
 // completion (cron occurrences, webhook deliveries).
 func IdempotencyKeyTTL(k string, window time.Duration) EnqueueOption {
 	return func(o *enqueueOptions) { o.idemKey = k; o.idemTTL = window }
+}
+
+// CoalesceKey drops this enqueue when a job of the same kind and key has not
+// started yet: that job will run and see whatever this one would have. A job
+// already running never absorbs it, so a signal arriving mid-run is never
+// lost; concurrent enqueues may both insert, which is a redundant run, never a
+// missed one. Coalesced jobs must be interchangeable — the dropped one's
+// payload is discarded — which fits a "go look again" signal such as "drain
+// this outbox". It cannot be combined with IdempotencyKey.
+func CoalesceKey(k string) EnqueueOption {
+	return func(o *enqueueOptions) { o.coalesceKey = k }
 }
 
 // MaxRetries overrides the retry budget for this job.
@@ -112,6 +124,9 @@ func (p *Producer) makeParams(ctx context.Context, args JobArgs, opts ...Enqueue
 	for _, opt := range opts {
 		opt(&o)
 	}
+	if o.coalesceKey != "" && o.idemKey != "" {
+		return driver.EnqueueParams{}, errors.New("queue: CoalesceKey cannot be combined with IdempotencyKey")
+	}
 
 	payload, err := json.Marshal(args)
 	if err != nil {
@@ -129,6 +144,7 @@ func (p *Producer) makeParams(ctx context.Context, args JobArgs, opts ...Enqueue
 		MaxAttemptsExplicit: o.maxRetriesExplicit,
 		IdempotencyKey:      o.idemKey,
 		IdempotencyTTL:      o.idemTTL,
+		CoalesceKey:         o.coalesceKey,
 	}, nil
 }
 
