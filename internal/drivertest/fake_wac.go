@@ -107,18 +107,16 @@ func (f *Fake) StartWorkflow(_ context.Context, p driver.WorkflowStartParams) (b
 		taskQueue = "default"
 	}
 	e := &fakeExecution{
-		WorkflowExecutionView: driver.WorkflowExecutionView{
-			ID:                     p.ID,
-			Name:                   p.Name,
-			Version:                p.Version,
-			State:                  driver.WorkflowRunning,
-			BusinessIdempotencyKey: p.BusinessIdempotencyKey,
-			TaskQueue:              taskQueue,
-			Input:                  clonePayload(p.Input),
-			Meta:                   cloneMeta(p.Meta),
-			CreatedAt:              now,
-			UpdatedAt:              now,
-		},
+		ID:                     p.ID,
+		Name:                   p.Name,
+		Version:                p.Version,
+		State:                  driver.WorkflowRunning,
+		BusinessIdempotencyKey: p.BusinessIdempotencyKey,
+		TaskQueue:              taskQueue,
+		Input:                  clonePayload(p.Input),
+		Meta:                   cloneMeta(p.Meta),
+		CreatedAt:              now,
+		UpdatedAt:              now,
 	}
 	e.history = append(e.history, driver.HistoryEvent{
 		WorkflowID: p.ID, Seq: 1, Type: "WorkflowStarted", Payload: clonePayload(p.Input), CreatedAt: now,
@@ -382,18 +380,16 @@ func (f *Fake) ScheduleOperation(_ context.Context, p driver.ScheduleOperationPa
 	}
 	id := uuid.New()
 	f.jobs[id] = &fakeJob{
-		Job: driver.Job{
-			ID:          id,
-			Source:      driver.SourceWorkflow,
-			Kind:        p.Kind,
-			State:       state,
-			RunID:       p.WorkflowID,
-			Payload:     clonePayload(p.Payload),
-			Meta:        meta,
-			RunAt:       runAt,
-			MaxAttempts: maxAttempts,
-			EnqueuedAt:  now,
-		},
+		ID:                  id,
+		Source:              driver.SourceWorkflow,
+		Kind:                p.Kind,
+		State:               state,
+		RunID:               p.WorkflowID,
+		Payload:             clonePayload(p.Payload),
+		Meta:                meta,
+		RunAt:               runAt,
+		MaxAttempts:         maxAttempts,
+		EnqueuedAt:          now,
 		maxAttemptsExplicit: true,
 		seq:                 f.nextSeq(),
 	}
@@ -499,16 +495,14 @@ func (f *Fake) scheduleTaskLocked(workflowID uuid.UUID, kind string, runAt time.
 	}
 	id := uuid.New()
 	f.jobs[id] = &fakeJob{
-		Job: driver.Job{
-			ID:         id,
-			Source:     driver.SourceWorkflow,
-			Kind:       kind,
-			State:      state,
-			RunID:      workflowID,
-			RunAt:      runAt,
-			EnqueuedAt: now,
-		},
-		seq: f.nextSeq(),
+		ID:         id,
+		Source:     driver.SourceWorkflow,
+		Kind:       kind,
+		State:      state,
+		RunID:      workflowID,
+		RunAt:      runAt,
+		EnqueuedAt: now,
+		seq:        f.nextSeq(),
 	}
 	f.bumpStat(driver.SourceWorkflow, kind, statEnqueued, 1, now)
 	f.changeJob(f.jobs[id])

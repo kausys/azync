@@ -246,17 +246,15 @@ func (f *Fake) enqueueLocked(p driver.EnqueueParams) (bool, error) {
 		state = driver.StateScheduled
 	}
 	f.jobs[p.ID] = &fakeJob{
-		Job: driver.Job{
-			ID:          p.ID,
-			Source:      driver.SourceQueue,
-			Kind:        p.Kind,
-			State:       state,
-			MaxAttempts: p.MaxAttempts,
-			Payload:     clonePayload(p.Payload),
-			Meta:        cloneMeta(p.Meta),
-			RunAt:       runAt,
-			EnqueuedAt:  now,
-		},
+		ID:                  p.ID,
+		Source:              driver.SourceQueue,
+		Kind:                p.Kind,
+		State:               state,
+		MaxAttempts:         p.MaxAttempts,
+		Payload:             clonePayload(p.Payload),
+		Meta:                cloneMeta(p.Meta),
+		RunAt:               runAt,
+		EnqueuedAt:          now,
 		maxAttemptsExplicit: p.MaxAttemptsExplicit,
 		idempotencyKey:      p.IdempotencyKey,
 		seq:                 f.nextSeq(),
@@ -303,17 +301,15 @@ func (f *Fake) publishLocked(p driver.PublishParams) (int, error) {
 func (f *Fake) createDelivery(eventID uuid.UUID, subscriber string, maxAttempts int, replay bool, now time.Time) {
 	id := uuid.New()
 	f.jobs[id] = &fakeJob{
-		Job: driver.Job{
-			ID:          id,
-			Source:      driver.SourceEvent,
-			Kind:        subscriber,
-			State:       driver.StatePending,
-			MaxAttempts: maxAttempts,
-			RunAt:       now,
-			EventID:     eventID,
-			Replay:      replay,
-			EnqueuedAt:  now,
-		},
+		ID:          id,
+		Source:      driver.SourceEvent,
+		Kind:        subscriber,
+		State:       driver.StatePending,
+		MaxAttempts: maxAttempts,
+		RunAt:       now,
+		EventID:     eventID,
+		Replay:      replay,
+		EnqueuedAt:  now,
 		// Event deliveries carry an explicit per-subscriber budget, so the
 		// queue-style first-lease default override never touches them.
 		maxAttemptsExplicit: true,
@@ -334,16 +330,14 @@ func (f *Fake) SeedOrphanDelivery(deliveryID uuid.UUID, subscriber string) {
 	defer f.mu.Unlock()
 	now := f.now()
 	f.jobs[deliveryID] = &fakeJob{
-		Job: driver.Job{
-			ID:          deliveryID,
-			Source:      driver.SourceEvent,
-			Kind:        subscriber,
-			State:       driver.StatePending,
-			MaxAttempts: 1,
-			RunAt:       now,
-			EventID:     uuid.New(), // no matching ledger event
-			EnqueuedAt:  now,
-		},
+		ID:                  deliveryID,
+		Source:              driver.SourceEvent,
+		Kind:                subscriber,
+		State:               driver.StatePending,
+		MaxAttempts:         1,
+		RunAt:               now,
+		EventID:             uuid.New(), // no matching ledger event
+		EnqueuedAt:          now,
 		maxAttemptsExplicit: true,
 		seq:                 f.nextSeq(),
 	}

@@ -134,8 +134,7 @@ type OutcomeError interface {
 // resolve through: an OutcomeError anywhere in err's chain decides the
 // outcome; anything else is a plain retry.
 func ClassifyOutcome(err error) Outcome {
-	var oe OutcomeError
-	if errors.As(err, &oe) {
+	if oe, ok := errors.AsType[OutcomeError](err); ok {
 		return oe.AsyncOutcome()
 	}
 	return Outcome{Kind: OutcomeRetry}

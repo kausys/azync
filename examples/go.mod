@@ -1,6 +1,6 @@
 module github.com/kausys/azync/examples
 
-go 1.26.5
+go 1.27.0
 
 require (
 	github.com/google/uuid v1.6.0

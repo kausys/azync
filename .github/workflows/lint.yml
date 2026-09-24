@@ -32,4 +32,4 @@ jobs:
           # Keep in sync with GOLANGCI_LINT_VERSION in run.sh — otherwise CI
           # floats to whatever the action defaults to while local lint stays
           # pinned, and the two can drift.
-          version: v2.12.2
+          version: v2.13.1

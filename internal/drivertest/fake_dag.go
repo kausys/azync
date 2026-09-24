@@ -102,17 +102,15 @@ func (f *Fake) CreateDAG(_ context.Context, p driver.DAGParams) (bool, uuid.UUID
 	}
 
 	w := &fakeDAG{
-		DAGView: driver.DAGView{
-			ID:             p.ID,
-			Name:           p.Name,
-			State:          driver.DAGRunning,
-			OnFailure:      onFailure,
-			IdempotencyKey: p.IdempotencyKey,
-			Meta:           cloneMeta(p.Meta),
-			CreatedAt:      now,
-			UpdatedAt:      now,
-		},
-		deps: slices.Clone(p.Deps),
+		ID:             p.ID,
+		Name:           p.Name,
+		State:          driver.DAGRunning,
+		OnFailure:      onFailure,
+		IdempotencyKey: p.IdempotencyKey,
+		Meta:           cloneMeta(p.Meta),
+		CreatedAt:      now,
+		UpdatedAt:      now,
+		deps:           slices.Clone(p.Deps),
 	}
 	f.dags[p.ID] = w
 	f.changeDAG(w)
@@ -147,23 +145,21 @@ func (f *Fake) insertDAGTask(w *fakeDAG, tk driver.DAGTask, hasDeps bool, now ti
 	}
 	id := uuid.New()
 	f.jobs[id] = &fakeJob{
-		Job: driver.Job{
-			ID:               id,
-			Source:           driver.SourceDAG,
-			Kind:             tk.Kind,
-			State:            state,
-			MaxAttempts:      tk.MaxAttempts,
-			Payload:          clonePayload(tk.Payload),
-			Meta:             cloneMeta(w.Meta),
-			RunAt:            runAt,
-			EnqueuedAt:       now,
-			DAGID:            w.ID,
-			TaskKey:          tk.Key,
-			SignalName:       tk.SignalName,
-			CompensationKind: tk.CompensationKind,
-			IgnoreDeadDeps:   tk.IgnoreDeadDeps,
-			SnoozeBudget:     max(tk.Deadline, 0),
-		},
+		ID:                  id,
+		Source:              driver.SourceDAG,
+		Kind:                tk.Kind,
+		State:               state,
+		MaxAttempts:         tk.MaxAttempts,
+		Payload:             clonePayload(tk.Payload),
+		Meta:                cloneMeta(w.Meta),
+		RunAt:               runAt,
+		EnqueuedAt:          now,
+		DAGID:               w.ID,
+		TaskKey:             tk.Key,
+		SignalName:          tk.SignalName,
+		CompensationKind:    tk.CompensationKind,
+		IgnoreDeadDeps:      tk.IgnoreDeadDeps,
+		SnoozeBudget:        max(tk.Deadline, 0),
 		maxAttemptsExplicit: tk.MaxAttempts > 0,
 		compensationPayload: clonePayload(tk.CompensationPayload),
 		sleepFor:            tk.SleepFor,
@@ -528,19 +524,17 @@ func (f *Fake) insertCompensationsLocked(w *fakeDAG, now time.Time) int {
 		}
 		id := uuid.New()
 		f.jobs[id] = &fakeJob{
-			Job: driver.Job{
-				ID:          id,
-				Source:      driver.SourceDAG,
-				Kind:        orig.CompensationKind,
-				State:       state,
-				MaxAttempts: orig.MaxAttempts,
-				Payload:     clonePayload(orig.compensationPayload),
-				Meta:        cloneMeta(w.Meta),
-				RunAt:       now,
-				EnqueuedAt:  now,
-				DAGID:       w.ID,
-				TaskKey:     key,
-			},
+			ID:                  id,
+			Source:              driver.SourceDAG,
+			Kind:                orig.CompensationKind,
+			State:               state,
+			MaxAttempts:         orig.MaxAttempts,
+			Payload:             clonePayload(orig.compensationPayload),
+			Meta:                cloneMeta(w.Meta),
+			RunAt:               now,
+			EnqueuedAt:          now,
+			DAGID:               w.ID,
+			TaskKey:             key,
 			maxAttemptsExplicit: orig.maxAttemptsExplicit,
 			seq:                 f.nextSeq(),
 		}
