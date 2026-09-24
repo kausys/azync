@@ -166,7 +166,7 @@ func (s *Store) enqueue(ctx context.Context, q querier, p driver.EnqueueParams, 
 		return false, nil // deduplicated by the live-job unique index
 	}
 	if err != nil {
-		return false, fmt.Errorf("azyncpgx: enqueue insert: %w", err)
+		return false, fmt.Errorf("azyncpgx: enqueue insert: %w", alreadyExists(err, "azync_jobs_pkey"))
 	}
 
 	if err := s.bumpStat(ctx, q, driver.SourceQueue, p.Kind, statEnqueued, 1); err != nil {

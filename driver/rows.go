@@ -91,7 +91,8 @@ const (
 // a zero time stays zero). A value can therefore be persisted and handed to a
 // driver later, as an outbox does.
 type EnqueueParams struct {
-	// ID is the caller-assigned primary key; drivers must not overwrite it.
+	// ID is the caller-assigned primary key; drivers must not overwrite it. An
+	// ID already present is refused with ErrAlreadyExists.
 	ID uuid.UUID `json:"id"`
 	// Kind names the job type and selects the fetch partition.
 	Kind string `json:"kind"`
@@ -133,7 +134,8 @@ type EnqueueParams struct {
 // a zero time stays zero). A value can therefore be persisted and handed to a
 // driver later, as an outbox does.
 type PublishParams struct {
-	// ID is the caller-assigned ledger primary key.
+	// ID is the caller-assigned ledger primary key. An ID already present is
+	// refused with ErrAlreadyExists.
 	ID uuid.UUID `json:"id"`
 	// Type is the event type; subscribers registered for it receive a delivery.
 	Type string `json:"type"`

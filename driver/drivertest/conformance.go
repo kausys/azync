@@ -162,6 +162,36 @@ func runEnqueue(t *testing.T, store driver.Store) {
 		is.Equal(driver.StateScheduled, getJob(ctx, t, store, driver.SourceQueue, scheduledID).State)
 	})
 
+	t.Run("an existing id is refused", func(t *testing.T) {
+		is := require.New(t)
+		id := uuid.New()
+		inserted, err := store.Enqueue(ctx, driver.EnqueueParams{ID: id, Kind: "enq_dupid", Payload: json.RawMessage(`{"n":1}`)})
+		is.NoError(err)
+		is.True(inserted)
+
+		inserted, err = store.Enqueue(ctx, driver.EnqueueParams{ID: id, Kind: "enq_dupid", Payload: json.RawMessage(`{"n":2}`)})
+		is.ErrorIs(err, driver.ErrAlreadyExists)
+		is.False(inserted)
+		is.JSONEq(`{"n":1}`, string(getJob(ctx, t, store, driver.SourceQueue, id).Payload), "the first write is untouched")
+	})
+
+	t.Run("a refused id leaves no window reservation behind", func(t *testing.T) {
+		is := require.New(t)
+		id := uuid.New()
+		_, err := store.Enqueue(ctx, driver.EnqueueParams{ID: id, Kind: "enq_dupttl", Payload: json.RawMessage(`{}`)})
+		is.NoError(err)
+		_, err = store.Enqueue(ctx, driver.EnqueueParams{
+			ID: id, Kind: "enq_dupttl", Payload: json.RawMessage(`{}`), IdempotencyKey: "w", IdempotencyTTL: time.Hour,
+		})
+		is.ErrorIs(err, driver.ErrAlreadyExists)
+
+		inserted, err := store.Enqueue(ctx, driver.EnqueueParams{
+			ID: uuid.New(), Kind: "enq_dupttl", Payload: json.RawMessage(`{}`), IdempotencyKey: "w", IdempotencyTTL: time.Hour,
+		})
+		is.NoError(err)
+		is.True(inserted, "the refused write reserved nothing")
+	})
+
 	t.Run("dedupe live rejects duplicate", func(t *testing.T) {
 		is := require.New(t)
 		first, err := store.Enqueue(ctx, driver.EnqueueParams{
@@ -580,6 +610,19 @@ func runPublish(t *testing.T, store driver.Store) {
 		delivered, err := store.Publish(ctx, driver.PublishParams{ID: uuid.New(), Type: "evt.fanout", OccurredAt: time.Now(), Payload: json.RawMessage(`{}`)})
 		is.NoError(err)
 		is.Equal(3, delivered, "one delivery per registered subscriber")
+	})
+
+	t.Run("an existing id is refused without a second fan-out", func(t *testing.T) {
+		is := require.New(t)
+		is.NoError(store.RegisterSubscriber(ctx, driver.Subscriber{Name: "dupid_s", EventType: "evt.dupid", MaxAttempts: 3}))
+		id := uuid.New()
+		_, err := store.Publish(ctx, driver.PublishParams{ID: id, Type: "evt.dupid", OccurredAt: time.Now(), Payload: json.RawMessage(`{}`)})
+		is.NoError(err)
+
+		delivered, err := store.Publish(ctx, driver.PublishParams{ID: id, Type: "evt.dupid", OccurredAt: time.Now(), Payload: json.RawMessage(`{}`)})
+		is.ErrorIs(err, driver.ErrAlreadyExists)
+		is.Zero(delivered)
+		is.Len(dequeueN(ctx, t, store, driver.SourceEvent, "dupid_s", 10, time.Minute), 1, "one delivery, from the first publish")
 	})
 
 	t.Run("subscriber registered after publish receives nothing", func(t *testing.T) {

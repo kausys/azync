@@ -83,7 +83,8 @@ const (
 // a zero time stays zero). A value can therefore be persisted and handed to a
 // driver later, as an outbox does.
 type DAGParams struct {
-	// ID is the caller-assigned primary key; drivers must not overwrite it.
+	// ID is the caller-assigned primary key; drivers must not overwrite it. An
+	// ID already present is refused with ErrAlreadyExists.
 	ID uuid.UUID `json:"id"`
 	// Name is the workflow definition name; dedupe scopes to it.
 	Name string `json:"name"`

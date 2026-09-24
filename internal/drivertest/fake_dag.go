@@ -81,7 +81,7 @@ func (f *Fake) CreateDAG(_ context.Context, p driver.DAGParams) (bool, uuid.UUID
 	// PRIMARY KEY (id): a caller reusing an id is a hard error, mirroring the
 	// SQL insert's PK violation — never a silent overwrite.
 	if _, exists := f.dags[p.ID]; exists {
-		return false, uuid.Nil, fmt.Errorf("drivertest: dag id %s already exists", p.ID)
+		return false, uuid.Nil, fmt.Errorf("drivertest: dag %s: %w", p.ID, driver.ErrAlreadyExists)
 	}
 
 	// UNIQUE (dag_id, task_key): validated before any insert so creation

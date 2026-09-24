@@ -15,6 +15,7 @@ import (
 	"cmp"
 	"context"
 	"encoding/json"
+	"fmt"
 	"maps"
 	"slices"
 	"strconv"
@@ -233,8 +234,15 @@ func (f *Fake) enqueueLocked(p driver.EnqueueParams) (bool, error) {
 			if exp, ok := f.idempotency[k]; ok && exp.After(now) {
 				return false, nil
 			}
-			f.idempotency[k] = now.Add(p.IdempotencyTTL)
 		}
+	}
+	// PRIMARY KEY (id): checked before the reservation below is written, since
+	// the SQL insert's violation rolls the reservation back with it.
+	if _, exists := f.jobs[p.ID]; exists {
+		return false, fmt.Errorf("drivertest: job %s: %w", p.ID, driver.ErrAlreadyExists)
+	}
+	if p.IdempotencyKey != "" && p.IdempotencyTTL > 0 {
+		f.idempotency[idemKey{source: driver.SourceQueue, kind: p.Kind, key: p.IdempotencyKey}] = now.Add(p.IdempotencyTTL)
 	}
 
 	runAt := p.RunAt
@@ -275,6 +283,9 @@ func (f *Fake) Publish(_ context.Context, p driver.PublishParams) (int, error) {
 }
 
 func (f *Fake) publishLocked(p driver.PublishParams) (int, error) {
+	if _, exists := f.events[p.ID]; exists {
+		return 0, fmt.Errorf("drivertest: event %s: %w", p.ID, driver.ErrAlreadyExists)
+	}
 	now := f.now()
 	f.events[p.ID] = driver.EventRecord{
 		ID:            p.ID,

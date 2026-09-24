@@ -239,6 +239,13 @@ func runDAGDedupe(t *testing.T, store driver.Store, ws driver.DAGStore) {
 	inserted, _, err = ws.CreateDAG(ctx, params())
 	is.NoError(err)
 	is.True(inserted, "a terminal workflow frees the idempotency key")
+
+	// A repeated id is not a dedupe: it is the same write made twice.
+	again := params()
+	again.ID, again.IdempotencyKey = first, "k2"
+	inserted, _, err = ws.CreateDAG(ctx, again)
+	is.ErrorIs(err, driver.ErrAlreadyExists)
+	is.False(inserted)
 }
 
 // ---- Promotion cascade ----------------------------------------------------
