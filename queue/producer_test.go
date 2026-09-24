@@ -227,3 +227,35 @@ type badArgs struct {
 }
 
 func (badArgs) Kind() string { return "queue.bad" }
+
+// TestTxProducerViaWritesThroughTheGivenStore proves the split TxProducerVia
+// exists for: the runtime builds the job, the store handed in writes it. The
+// runtime's own driver has no transactional capability and receives nothing.
+func TestTxProducerViaWritesThroughTheGivenStore(t *testing.T) {
+	t.Parallel()
+	is := require.New(t)
+	r := newTestRuntime(t, drivertest.NewFake()) // implements no TxStore
+	other := &txFake{Fake: drivertest.NewFake()}
+
+	tp, err := r.TxProducerVia(other) // TTx inferred from the store's methods
+	is.NoError(err)
+	res, err := tp.EnqueueTx(context.Background(), struct{}{}, testArgs{Value: "via"}, MaxRetries(4), Meta("origin", "outbox"))
+	is.NoError(err)
+
+	job := getJob(t, other.Fake, res.ID)
+	is.Equal("queue.test", job.Kind)
+	is.Equal(4, job.MaxAttempts)
+	is.Equal("outbox", job.Meta["origin"])
+	is.JSONEq(`{"value":"via"}`, string(job.Payload))
+
+	view, err := r.Manager().Get(context.Background(), res.ID)
+	is.NoError(err)
+	is.Nil(view, "the runtime's own driver received nothing")
+}
+
+func TestTxProducerViaRefusesANilStore(t *testing.T) {
+	t.Parallel()
+	r := newTestRuntime(t, drivertest.NewFake())
+	_, err := r.TxProducerVia[struct{}](nil)
+	require.ErrorContains(t, err, "store is nil")
+}

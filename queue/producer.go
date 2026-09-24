@@ -3,6 +3,7 @@ package queue
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"reflect"
 	"time"
@@ -152,6 +153,20 @@ func (r *Runtime) TxProducer[TTx any]() (*TxProducerClient[TTx], error) {
 			store, reflect.TypeFor[TTx]())
 	}
 	return &TxProducerClient[TTx]{store: ts, producer: r.producer}, nil
+}
+
+// TxProducerVia builds the transactional enqueue client over store instead of
+// the runtime's own driver. The job is built exactly as TxProducer builds it —
+// id, payload, schedule, retry budget, keys, metadata, trace context — and
+// store decides where it is written. It enlists an enqueue in a transaction on
+// a database the runtime's driver does not operate, such as an outbox kept
+// beside the application's own tables, which later forwards what it holds to
+// the runtime's driver.
+func (r *Runtime) TxProducerVia[TTx any](store driver.TxStore[TTx]) (*TxProducerClient[TTx], error) {
+	if store == nil {
+		return nil, errors.New("queue: TxProducerVia store is nil")
+	}
+	return &TxProducerClient[TTx]{store: store, producer: r.producer}, nil
 }
 
 // EnqueueTx performs Enqueue within tx, letting the caller atomically commit

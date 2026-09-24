@@ -404,3 +404,34 @@ func TestTxRunnerCreatesThroughTx(t *testing.T) {
 	is.Equal("tx", view.Name)
 	is.Equal(3, taskByKey(t, f.Fake, res.ID, "t").MaxAttempts)
 }
+
+// TestTxRunnerViaWritesThroughTheGivenStore proves the split TxRunnerVia exists
+// for: the runtime compiles the workflow, the store handed in writes it. The
+// runtime's own driver has no transactional capability and receives nothing.
+func TestTxRunnerViaWritesThroughTheGivenStore(t *testing.T) {
+	t.Parallel()
+	is := require.New(t)
+	own := drivertest.NewFake() // no TxDAGStore
+	r := newTestRuntime(t, own)
+	other := &txWorkflowFake{Fake: drivertest.NewFake()}
+
+	tr, err := r.TxRunnerVia(other) // TTx inferred from the store's methods
+	is.NoError(err)
+	res, err := tr.RunTx(context.Background(), struct{}{},
+		Define("via").Task("t", cliArgs{V: "x"}, MaxRetries(3)))
+	is.NoError(err)
+
+	is.Equal("via", getDAG(t, other.Fake, res.ID).Name)
+	is.Equal(3, taskByKey(t, other.Fake, res.ID, "t").MaxAttempts)
+
+	view, err := r.Manager().Get(context.Background(), res.ID)
+	is.NoError(err)
+	is.Nil(view, "the runtime's own driver received nothing")
+}
+
+func TestTxRunnerViaRefusesANilStore(t *testing.T) {
+	t.Parallel()
+	r := newTestRuntime(t, drivertest.NewFake())
+	_, err := r.TxRunnerVia[struct{}](nil)
+	require.ErrorContains(t, err, "store is nil")
+}

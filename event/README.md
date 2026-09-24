@@ -26,7 +26,7 @@ Requires Core + event ledger + delivery jobs. No DAG/WorkflowStore.
 
 - `New` / `Open` → `Publisher`, `Worker`, `Manager`
 - `Worker.Register` / `Worker.RegisterFunc`
-- `Runtime.TxPublisher[T]()`
+- `Runtime.TxPublisher[T]()` / `Runtime.TxPublisherVia(store)`
 - `Manager.Replay`
 
 ## Boundaries

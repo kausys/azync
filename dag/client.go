@@ -247,6 +247,19 @@ func (r *Runtime) TxRunner[TTx any]() (*TxRunnerClient[TTx], error) {
 	return &TxRunnerClient[TTx]{store: ts, client: r.client}, nil
 }
 
+// TxRunnerVia builds the transactional creation client over store instead of
+// the runtime's own driver. The workflow is compiled and validated exactly as
+// TxRunner does it and store decides where it is written. It enlists a
+// creation in a transaction on a database the runtime's driver does not
+// operate, such as an outbox kept beside the application's own tables, which
+// later forwards what it holds to the runtime's driver.
+func (r *Runtime) TxRunnerVia[TTx any](store driver.TxDAGStore[TTx]) (*TxRunnerClient[TTx], error) {
+	if store == nil {
+		return nil, errors.New("dag: TxRunnerVia store is nil")
+	}
+	return &TxRunnerClient[TTx]{store: store, client: r.client}, nil
+}
+
 // RunTx performs Run within tx, letting the caller atomically commit
 // application writes and the workflow creation. Same validation, options and
 // dedupe semantics as Run.

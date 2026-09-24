@@ -99,7 +99,7 @@ err = pgx.BeginFunc(ctx, pool, func(tx pgx.Tx) error {
 })
 ```
 
-Same rule as queue: `tx` must be open against the database (and `search_path`) the store uses. For a `*sql.Tx`, build the Core over `store.SQLTx()` and use `ev.TxPublisher[*sql.Tx]()` — see [queue.md](queue.md#over-databasesql).
+Same rule as queue: `tx` must be open against the database (and `search_path`) the store uses. For a `*sql.Tx`, build the Core over `store.SQLTx()` and use `ev.TxPublisher[*sql.Tx]()` — see [queue.md](queue.md#over-databasesql). `ev.TxPublisherVia(store)` builds the same client over a store you choose — see [queue.md](queue.md#through-another-store).
 
 ## Replay
 
