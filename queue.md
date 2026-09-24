@@ -110,7 +110,26 @@ err = pgx.BeginFunc(ctx, pool, func(tx pgx.Tx) error {
 })
 ```
 
-`tx` must come from the same pool the azync store uses. Prefer building the pool yourself, `azyncpgx.New(pool)`, then `azync.New(store)`.
+`tx` must be open against the database azync's tables live in, with the same `search_path` when the store uses `WithSchema`. It does not have to come from the store's own pool.
+
+### Over `database/sql`
+
+An application that reaches Postgres through `database/sql` — directly or through a library built on it — enlists its `*sql.Tx` instead. Build the Core over the store's `SQLTx` view; every runtime on that Core then resolves its transactional client for `*sql.Tx`:
+
+```go
+store := azyncpgx.New(pool, azyncpgx.WithSchema("jobs"))
+core, err := azync.New(store.SQLTx())
+q, err := queue.New(core)
+
+producer, err := q.TxProducer[*sql.Tx]()
+
+tx, err := db.BeginTx(ctx, nil)
+// your writes on tx...
+_, err = producer.EnqueueTx(ctx, tx, SendReceipt{OrderID: orderID})
+err = tx.Commit()
+```
+
+The statements enlisted are the same ones the `pgx.Tx` path runs, and the worker wakeup is sent inside the transaction, so it fires only on commit. A Core serves one transaction type: over `SQLTx()` it refuses `pgx.Tx`.
 
 ## Cron
 

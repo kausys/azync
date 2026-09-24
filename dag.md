@@ -110,6 +110,8 @@ txc, err := d.TxRunner[pgx.Tx]() // needs driver.TxDAGStore
 res, err := txc.RunTx(ctx, tx, def, dag.WithIdempotencyKey(key))
 ```
 
+Over `database/sql`, build the Core over `store.SQLTx()` and use `d.TxRunner[*sql.Tx]()` — see [queue.md](queue.md#over-databasesql).
+
 ## Retention
 
 `dag.WithRetention(d)` — vacuum terminal DAGs after duration (default **30 days**; `0` = forever). Succeeded task rows are exempt from completed-job vacuum until the DAG itself is vacuumed.

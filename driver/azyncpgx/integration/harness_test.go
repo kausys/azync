@@ -110,8 +110,13 @@ type harness struct {
 // and tight fetch cadences so lease/reap/wake behavior is provable within a
 // test's wall clock.
 func fastCoreOptions(schema string) []azync.Option {
+	return append([]azync.Option{azync.WithSchema(schema)}, fastRuntimeOptions()...)
+}
+
+// fastRuntimeOptions are fastCoreOptions without the ones only azync.Open
+// accepts, for a Core built with azync.New over a store the test constructs.
+func fastRuntimeOptions() []azync.Option {
 	return []azync.Option{
-		azync.WithSchema(schema),
 		azync.WithLogger(discardLogger()),
 		azync.WithLeaseTTL(2 * time.Second),
 		azync.WithFetchPollInterval(20 * time.Millisecond),
