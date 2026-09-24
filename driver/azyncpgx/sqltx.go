@@ -129,7 +129,14 @@ func (r sqlRow) Scan(dest ...any) error {
 // sqlRows adapts *sql.Rows to pgx.Rows. The pgx-specific accessors that
 // database/sql has no equivalent for (field descriptions, raw wire values,
 // the underlying connection) report nothing.
+//
+// It embeds the pgx.Rows interface, left nil, so it keeps satisfying pgx.Rows
+// when pgx adds a method to it — v5.11 added TypeMap, and an adapter that
+// implemented the interface method by method stopped compiling for every
+// module that required it. The driver's own paths call only the methods
+// below; one pgx adds later is never reached, and would panic if it were.
 type sqlRows struct {
+	pgx.Rows
 	rows *sql.Rows
 	err  error
 }
