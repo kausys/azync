@@ -18,7 +18,7 @@ ALL_MODULES=("$ROOT_MODULE" "${SUB_MODULES[@]}")
 # (.github/workflows/lint.yml, .github/workflows/release.yml) — keep the
 # `version:` input on each golangci-lint-action step in those workflows equal
 # to this value.
-GOLANGCI_LINT_VERSION="v2.13.1"
+GOLANGCI_LINT_VERSION="v2.14.0"
 BIN_DIR="$ROOT_DIR/bin"
 GOLANGCI_LINT="$BIN_DIR/golangci-lint"
 
