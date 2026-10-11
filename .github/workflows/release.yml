@@ -20,6 +20,9 @@ jobs:
       - uses: actions/setup-go@v7
         with:
           go-version-file: go.mod
+          # go.mod names 1.27 with no patch: take the newest 1.27.x, not the
+          # one the runner happens to have cached.
+          check-latest: true
 
       - name: Test
         run: |
@@ -31,21 +34,21 @@ jobs:
         uses: golangci/golangci-lint-action@v9
         with:
           args: --config ${{ github.workspace }}/.golangci.yml
-          version: v2.13.1 # keep in sync with GOLANGCI_LINT_VERSION in run.sh
+          version: v2.14.0 # keep in sync with GOLANGCI_LINT_VERSION in run.sh
 
       - name: Lint driver/azyncpgx
         uses: golangci/golangci-lint-action@v9
         with:
           working-directory: driver/azyncpgx
           args: --config ${{ github.workspace }}/.golangci.yml
-          version: v2.13.1 # keep in sync with GOLANGCI_LINT_VERSION in run.sh
+          version: v2.14.0 # keep in sync with GOLANGCI_LINT_VERSION in run.sh
 
       - name: Lint examples
         uses: golangci/golangci-lint-action@v9
         with:
           working-directory: examples
           args: --config ${{ github.workspace }}/.golangci.yml
-          version: v2.13.1 # keep in sync with GOLANGCI_LINT_VERSION in run.sh
+          version: v2.14.0 # keep in sync with GOLANGCI_LINT_VERSION in run.sh
 
       # release-please also mirrors driver/azyncpgx/vX.Y.Z on release_created; keep
       # this for manual v* tags and make it idempotent so re-runs do not fail with

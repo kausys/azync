@@ -29,8 +29,11 @@ jobs:
       - name: Set up Go
         uses: actions/setup-go@v7
         with:
-          # Pin the toolchain to go.mod so CI cannot drift from the modules.
+          # The minor comes from go.mod, so CI cannot drift from the modules;
+          # go.mod names 1.27 with no patch, so take the newest 1.27.x rather
+          # than the one the runner happens to have cached.
           go-version-file: go.mod
+          check-latest: true
           cache: false
 
       - name: Download dependencies
@@ -89,6 +92,7 @@ jobs:
         uses: actions/setup-go@v7
         with:
           go-version-file: go.mod
+          check-latest: true
           cache: false
 
       - name: Download dependencies

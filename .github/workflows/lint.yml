@@ -23,6 +23,9 @@ jobs:
       - uses: actions/setup-go@v7
         with:
           go-version-file: go.mod
+          # go.mod names 1.27 with no patch: take the newest 1.27.x, not the
+          # one the runner happens to have cached.
+          check-latest: true
 
       - name: golangci-lint
         uses: golangci/golangci-lint-action@v9
@@ -32,4 +35,4 @@ jobs:
           # Keep in sync with GOLANGCI_LINT_VERSION in run.sh — otherwise CI
           # floats to whatever the action defaults to while local lint stays
           # pinned, and the two can drift.
-          version: v2.13.1
+          version: v2.14.0
