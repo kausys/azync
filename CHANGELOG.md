@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.0.12](https://github.com/kausys/azync/compare/v0.0.11...v0.0.12) (2026-10-11)
+
+
+### Bug Fixes
+
+* **deps:** declare go 1.27, update dependencies and CI ([#27](https://github.com/kausys/azync/issues/27)) ([672cb7b](https://github.com/kausys/azync/commit/672cb7bf84b4ce05230d1421b3629d2f0ec7246c))
+
 ## [0.0.11](https://github.com/kausys/azync/compare/v0.0.10...v0.0.11) (2026-09-24)
 
 
