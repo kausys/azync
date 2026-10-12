@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.0.13](https://github.com/kausys/azync/compare/v0.0.12...v0.0.13) (2026-10-12)
+
+
+### Features
+
+* ask whether an error is permanent and whether it will be retried ([#29](https://github.com/kausys/azync/issues/29)) ([51f3180](https://github.com/kausys/azync/commit/51f3180d3c65d66c1bf7c2359ef868bc7bfda07f))
+
 ## [0.0.12](https://github.com/kausys/azync/compare/v0.0.11...v0.0.12) (2026-10-11)
 
 
