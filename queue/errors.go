@@ -30,6 +30,10 @@ func Abort(err error) error {
 	return &jobError{err: err, kind: engine.OutcomeAbort}
 }
 
+// IsAbort reports whether err is marked Abort — or carries any runtime's abort
+// sentinel — anywhere in its chain: the job goes straight to the dead letter.
+func IsAbort(err error) bool { return engine.IsPermanent(err) }
+
 // Retry reschedules with exponential backoff (also the default for plain errors).
 func Retry(err error) error {
 	return &jobError{err: err, kind: engine.OutcomeRetry}

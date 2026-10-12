@@ -88,9 +88,11 @@ go func() {
 | `queue.Abort(err)` | Dead letter immediately |
 | `queue.Reportable(err)` | Retry + mark reportable for ops |
 
+`queue.IsAbort(err)` (or `azync.IsPermanent`, for any runtime's sentinel) and `queue.WillRetry(ctx, err)` answer, outside the handler, whether the job goes to the dead letter or runs again.
+
 ### Context accessors
 
-`JobID`, `Kind`, `Attempt`, `MaxAttempts`, `IsRetry`, `EnqueuedAt`, `Metadata`.
+`JobID`, `Kind`, `Attempt`, `MaxAttempts`, `LastAttempt`, `IsRetry`, `EnqueuedAt`, `Metadata`, and `WillRetry(ctx, err)`.
 
 ## Transactional outbox
 

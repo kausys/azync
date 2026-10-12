@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/kausys/azync/driver"
+	"github.com/kausys/azync/internal/engine"
 
 	"github.com/google/uuid"
 )
@@ -101,6 +102,21 @@ func MaxAttempts(ctx context.Context) int { return taskFromContext(ctx).MaxAttem
 // IsRetry reports whether this is a re-execution (Attempt > 1). False outside
 // a task.
 func IsRetry(ctx context.Context) bool { return taskFromContext(ctx).Attempt > 1 }
+
+// LastAttempt reports whether this attempt spends the last of the task's retry
+// budget: a failure now fails the task. False outside a task.
+func LastAttempt(ctx context.Context) bool {
+	t := taskFromContext(ctx)
+	return engine.LastAttempt(t.Attempt, t.MaxAttempts)
+}
+
+// WillRetry reports whether the task runs again if it returns err: not for
+// nil, an Abort or a Skip, not on the last attempt, always for NotReady, which
+// spends no attempt, and yes otherwise. False outside a task.
+func WillRetry(ctx context.Context, err error) bool {
+	t := taskFromContext(ctx)
+	return engine.WillRetry(err, t.Attempt, t.MaxAttempts)
+}
 
 // Metadata returns the workflow's string-valued annotations (definition
 // WithMeta plus run WithRunMeta). Nil outside a task.

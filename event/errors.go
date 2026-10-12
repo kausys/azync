@@ -31,6 +31,11 @@ func Permanent(err error) error {
 	return &permanentError{err: err}
 }
 
+// IsPermanent reports whether err is marked Permanent — or carries any
+// runtime's abort sentinel — anywhere in its chain: the delivery goes straight
+// to the dead letter.
+func IsPermanent(err error) bool { return engine.IsPermanent(err) }
+
 // classify maps a handler error to the engine outcome the executor settles
 // by, through the shared cross-runtime classifier: any runtime's sentinel is
 // honored (Permanent aborts; a dag.NotReady from shared handler code snoozes
