@@ -68,7 +68,7 @@ Task options also include `MaxRetries(n)`. Kind strings must not use a `$` prefi
 
 ### Context accessors
 
-`ID`, `TaskKey`, `Attempt`, `MaxAttempts`, `IsRetry`, `Metadata`.
+`ID`, `TaskKey`, `Attempt`, `MaxAttempts`, `LastAttempt`, `IsRetry`, `Metadata`, and `WillRetry(ctx, err)` — true for `NotReady`, which spends no attempt. `dag.IsAbort(err)` tells an abort from a retry.
 
 ### Handler errors
 

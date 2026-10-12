@@ -140,6 +140,36 @@ func ClassifyOutcome(err error) Outcome {
 	return Outcome{Kind: OutcomeRetry}
 }
 
+// IsPermanent reports whether err settles its job straight in the dead letter:
+// an abort sentinel of any runtime anywhere in its chain.
+func IsPermanent(err error) bool {
+	return err != nil && ClassifyOutcome(err).Kind == OutcomeAbort
+}
+
+// WillRetry reports whether a handler that returned err on attempt, out of a
+// budget of maxAttempts, runs again: never for nil, an abort or a skip; always
+// for a snooze, which spends no attempt; and for anything else while attempts
+// remain. A maxAttempts of zero — a context that is not a job's — never does.
+func WillRetry(err error, attempt, maxAttempts int) bool {
+	if err == nil || maxAttempts <= 0 {
+		return false
+	}
+	switch ClassifyOutcome(err).Kind {
+	case OutcomeAbort, OutcomeSkip:
+		return false
+	case OutcomeSnooze:
+		return true
+	default:
+		return attempt < maxAttempts
+	}
+}
+
+// LastAttempt reports whether attempt spends the last of maxAttempts. False
+// outside a job, where maxAttempts is zero.
+func LastAttempt(attempt, maxAttempts int) bool {
+	return maxAttempts > 0 && attempt >= maxAttempts
+}
+
 // Kind registers one job kind on the engine: its limits, its handler and its
 // error classifier. Decoding and error taxonomy live with the consumer; the
 // engine only sees driver.Job in and error out.

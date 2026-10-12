@@ -5,6 +5,7 @@ import (
 	"time"
 
 	"github.com/kausys/azync/driver"
+	"github.com/kausys/azync/internal/engine"
 
 	"github.com/google/uuid"
 )
@@ -68,6 +69,21 @@ func MaxAttempts(ctx context.Context) int { return jobFromContext(ctx).MaxAttemp
 // IsRetry reports whether this is a re-execution (Attempt > 1). False outside a
 // job.
 func IsRetry(ctx context.Context) bool { return jobFromContext(ctx).Attempt > 1 }
+
+// LastAttempt reports whether this attempt spends the last of the job's retry
+// budget: a failure now goes to the dead letter. False outside a job.
+func LastAttempt(ctx context.Context) bool {
+	j := jobFromContext(ctx)
+	return engine.LastAttempt(j.Attempt, j.MaxAttempts)
+}
+
+// WillRetry reports whether the job runs again if the handler returns err: not
+// for nil or an Abort, not on the last attempt, yes otherwise. False outside a
+// job.
+func WillRetry(ctx context.Context, err error) bool {
+	j := jobFromContext(ctx)
+	return engine.WillRetry(err, j.Attempt, j.MaxAttempts)
+}
 
 // EnqueuedAt is when the job was durably inserted. Zero outside a job.
 func EnqueuedAt(ctx context.Context) time.Time { return jobFromContext(ctx).EnqueuedAt }

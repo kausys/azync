@@ -5,6 +5,7 @@ import (
 	"time"
 
 	"github.com/kausys/azync/driver"
+	"github.com/kausys/azync/internal/engine"
 
 	"github.com/google/uuid"
 )
@@ -107,6 +108,22 @@ func MaxAttempts(ctx context.Context) int { return deliveryFromContext(ctx).MaxA
 // IsRetry reports whether this is a re-delivery (Attempt > 1). False outside a
 // delivery.
 func IsRetry(ctx context.Context) bool { return deliveryFromContext(ctx).Attempt > 1 }
+
+// LastAttempt reports whether this delivery spends the last of its retry
+// budget: a failure now goes to the dead letter. False outside a delivery.
+func LastAttempt(ctx context.Context) bool {
+	d := deliveryFromContext(ctx)
+	return engine.LastAttempt(d.Attempt, d.MaxAttempts)
+}
+
+// WillRetry reports whether the delivery runs again if the handler returns
+// err: not for nil or a Permanent error, not on the last attempt, yes
+// otherwise. A logger can ask it to write a failure that will be retried as a
+// warning and the last one as an error. False outside a delivery.
+func WillRetry(ctx context.Context, err error) bool {
+	d := deliveryFromContext(ctx)
+	return engine.WillRetry(err, d.Attempt, d.MaxAttempts)
+}
 
 // Metadata returns the string-valued annotations attached at publish time. Nil
 // outside a delivery.

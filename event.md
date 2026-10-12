@@ -78,9 +78,11 @@ Subscriptions are durable and unique per `(subscriber name, event type)`. Prefer
 
 Deliveries are at-least-once and **not ordered** across subscribers. Deduplicate with `(EventID, SubscriberName)` if your projector needs it.
 
+Code outside the handler asks the same questions of an error: `event.IsPermanent(err)` (or `azync.IsPermanent`, which answers for any runtime's sentinel) and `event.WillRetry(ctx, err)` — false for a permanent error and on the last attempt. A logger can write a failure that will be retried as a warning and the last one as an error.
+
 ### Context accessors
 
-`EventID`, `Type`, `OccurredAt`, `SubscriberName`, `Attempt`, `MaxAttempts`, `IsRetry`, `IsReplay`, `AggregateType`, `AggregateID`, `Version`, `Metadata`.
+`EventID`, `Type`, `OccurredAt`, `SubscriberName`, `Attempt`, `MaxAttempts`, `LastAttempt`, `IsRetry`, `IsReplay`, `AggregateType`, `AggregateID`, `Version`, `Metadata`, and `WillRetry(ctx, err)`.
 
 ## Transactional publish
 

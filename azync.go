@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/kausys/azync/driver"
+	"github.com/kausys/azync/internal/engine"
 )
 
 // maxIdentifierBytes bounds a schema/channel/table name, matching PostgreSQL's
@@ -432,3 +433,13 @@ func isIdentifierStart(c byte) bool {
 func isIdentifierPart(c byte) bool {
 	return isIdentifierStart(c) || (c >= '0' && c <= '9') || c == '$'
 }
+
+// IsPermanent reports whether err ends its work without another try, whichever
+// runtime's sentinel marks it: event.Permanent, queue.Abort or dag.Abort
+// anywhere in its chain. A plain error is retried, and so is one marked to
+// retry or to wait; it is not permanent.
+//
+// It is what code outside a handler asks — a logger choosing between a warning
+// and an error, a tracer marking a span — so it does not have to keep a marker
+// of its own beside the one the runtime settles by.
+func IsPermanent(err error) bool { return engine.IsPermanent(err) }
